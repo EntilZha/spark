@@ -33,7 +33,7 @@ class TopicModelingSuite extends FunSuite with LocalSparkContext with Matchers {
       val tokens = lines.flatMap(line => line.split(" "))
       val (vocab:Array[String], vocabLookup:Map[String, WordId]) = LDA.extractVocab(tokens)
       // Extract the edges then reverse the wordId and docId to let us use groupByKey
-      val edges:RDD[(LDA.WordId, LDA.DocId)] = LDA.edgesFromTextDocLines(sc, lines, vocab, vocabLookup)
+      val edges:RDD[(LDA.WordId, LDA.DocId)] = LDA.edgesFromTextDocLines(lines, vocab, vocabLookup)
         .map{ case (wordId:WordId, docId:DocId) =>
         (docId, wordId)
       }
@@ -54,7 +54,7 @@ class TopicModelingSuite extends FunSuite with LocalSparkContext with Matchers {
       val lines = sc.textFile("data/lda-mini-test.txt")
       val tokens = lines.flatMap(line => line.split(" "))
       val (vocab, vocabLookup) = LDA.extractVocab(tokens)
-      val edges = LDA.edgesFromTextDocLines(sc, lines, vocab, vocabLookup)
+      val edges = LDA.edgesFromTextDocLines(lines, vocab, vocabLookup)
       val model = new LDA(edges, nTopics=2)
       model.iterate(20)
       val topWords = model.topWords(2)

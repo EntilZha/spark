@@ -44,11 +44,11 @@ object LDA {
     }
     (vocab, vocabLookup)
   }
-  def edgesFromTextDocLines(sc:SparkContext,
-                            lines:RDD[String],
+  def edgesFromTextDocLines(lines:RDD[String],
                             vocab:Array[String],
                             vocabLookup:Map[String, WordId],
                             delimiter:String=" "): RDD[(LDA.WordId, LDA.DocId)] = {
+    val sc = lines.sparkContext
     val numDocs = lines.count()
     val docIds:RDD[DocId] = sc.parallelize((0L until numDocs).toArray)
     val docsWithIds = lines.zip(docIds)
@@ -58,6 +58,48 @@ object LDA {
       docEdges
     }
     edges
+  }
+  def sampleToken(gen:java.util.Random,
+                  triplet:EdgeTriplet[Factor, TopicId],
+                  totalHistBroadCast:Broadcast[LDA.Factor],
+                  nt:Int,
+                  alpha:Double,
+                  beta:Double,
+                  nw:Long): Int = {
+
+    val wHist:Array[Count] = triplet.srcAttr
+    val dHist:Array[Count] = triplet.dstAttr
+    val totalHist = totalHistBroadCast.value
+    val oldTopic = triplet.attr
+    assert(wHist(oldTopic) > 0)
+    assert(dHist(oldTopic) > 0)
+    assert(totalHist(oldTopic) > 0)
+    // Construct the conditional
+    val conditional = new Array[Double](nt)
+    var t = 0
+    var conditionalSum = 0.0
+    while (t < conditional.size) {
+      val cavityOffset = if (t == oldTopic)1 else 0
+      val w = wHist(t) - cavityOffset
+      val d = dHist(t) - cavityOffset
+      val total = totalHist(t) - cavityOffset
+      conditional(t) = (alpha + d) * (beta + w) / (beta * nw + total)
+      conditionalSum += conditional(t)
+      t += 1
+    }
+    assert(conditionalSum > 0.0)
+    // Generate a random number between [0, conditionalSum)
+    val u = gen.nextDouble() * conditionalSum
+    assert(u < conditionalSum)
+    // Draw the new topic from the multinomial
+    t = 0
+    var cumsum = conditional(t)
+    while (cumsum < u) {
+      t += 1
+      cumsum += conditional(t)
+    }
+    val newTopic = t
+    return newTopic
   }
 } // end of LDA singleton
 
@@ -138,7 +180,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   def iterate(nIter: Int = 1) {
     // Run the sampling
     for (i <- 0 until nIter) {
-      //println("Starting iteration: " + i.toString)
+      println("Starting iteration: " + i.toString)
       // Broadcast the topic histogram
       val totalHistbcast = sc.broadcast(totalHist)
       // Shadowing because scala's closure capture is an abomination
@@ -189,8 +231,17 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
       graph = graph.mapTriplets { (pid, iter) =>
-        val gen = new java.util.Random(parts * interIter + pid)
-        iter.map(token => sampleToken(gen, token))
+        val gen1 = new java.util.Random(parts * interIter + pid)
+        val gen2 = new java.util.Random(parts * interIter + pid)
+        iter.map { token =>
+          assert(token != null)
+          assert(token.srcAttr != null)
+          assert(token.dstAttr != null)
+          val ret1 = LDA.sampleToken(gen1, token, totalHistbcast, nt, a, b, nw)
+          val ret2 = sampleToken(gen2, token)
+          assert(ret1 == ret2)
+          ret1
+        }
       }
 
       // Update the counts

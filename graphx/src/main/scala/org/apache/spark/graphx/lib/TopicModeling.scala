@@ -36,13 +36,28 @@ object LDA {
     f(topic) += 1
     f
   }
-  def extractVocab(tokens:RDD[String]): (Array[String], Map[String, Int]) = {
+  def extractVocab(tokens:RDD[String]): (Array[String], Map[String, WordId]) = {
     val vocab = tokens.distinct().collect()
-    var vocabLookup:Map[String, Int] = Map()
+    var vocabLookup:Map[String, WordId] = Map()
     for (i <- 0 to vocab.length - 1) {
       vocabLookup += (vocab(i) -> i)
     }
-    return (vocab, vocabLookup)
+    (vocab, vocabLookup)
+  }
+  def edgesFromTextDocLines(sc:SparkContext,
+                            lines:RDD[String],
+                            vocab:Array[String],
+                            vocabLookup:Map[String, WordId],
+                            delimiter:String=" "): RDD[(LDA.WordId, LDA.DocId)] = {
+    val numDocs = lines.count()
+    val docIds:RDD[DocId] = sc.parallelize((0L until numDocs).toArray)
+    val docsWithIds = lines.zip(docIds)
+    val edges:RDD[(WordId, DocId)] = docsWithIds.flatMap{ case (line:String, docId:DocId) =>
+      val words = line.split(delimiter)
+      val docEdges = words.map(word => (vocabLookup(word), docId))
+      docEdges
+    }
+    edges
   }
 } // end of LDA singleton
 
@@ -123,7 +138,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   def iterate(nIter: Int = 1) {
     // Run the sampling
     for (i <- 0 until nIter) {
-      println("Starting iteration: " + i.toString)
+      //println("Starting iteration: " + i.toString)
       // Broadcast the topic histogram
       val totalHistbcast = sc.broadcast(totalHist)
       // Shadowing because scala's closure capture is an abomination

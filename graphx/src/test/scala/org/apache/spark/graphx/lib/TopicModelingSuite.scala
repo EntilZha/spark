@@ -27,10 +27,51 @@ import org.apache.spark.graphx._
 import org.apache.spark.rdd._
 
 class TopicModelingSuite extends FunSuite with LocalSparkContext with Matchers {
-  test("Simple LDA test with lda-minitest.txt") {
+  test("Test edge generation") {
     withSpark { sc =>
-      val data = sc.textFile("data/lda-mini-test.txt")
-      val (vocab, vocabLookup) = LDA.extractVocab(data.flatMap(line => line.split(" ")))
+      val lines = sc.textFile("data/lda-mini-test.txt")
+      val tokens = lines.flatMap(line => line.split(" "))
+      val (vocab:Array[String], vocabLookup:Map[String, WordId]) = LDA.extractVocab(tokens)
+      // Extract the edges then reverse the wordId and docId to let us use groupByKey
+      val edges:RDD[(LDA.WordId, LDA.DocId)] = LDA.edgesFromTextDocLines(sc, lines, vocab, vocabLookup)
+        .map{ case (wordId:WordId, docId:DocId) =>
+        (docId, wordId)
+      }
+      // Reconstruct the documents to test the LDA.edgesFromTextDocLines call
+      val docs:Array[String] = edges.groupByKey().collect().map{ case (docId:DocId, tokens:Iterable[WordId]) =>
+        tokens.toArray.sorted.mkString
+      }.sorted
+      // Construct equivalent structure directly
+      val docsExpect:Array[String] = lines.map({ line =>
+        line.split(" ").map(token => vocabLookup(token)).sorted.mkString
+      }).collect().sorted
+      // Test that the arrays are equal. Do this by sorting each token list, converting to string representation
+      docs should equal (docsExpect)
+    }
+  }
+  test("Run lda-mini-test") {
+    withSpark { sc =>
+      val lines = sc.textFile("data/lda-mini-test.txt")
+      val tokens = lines.flatMap(line => line.split(" "))
+      val (vocab, vocabLookup) = LDA.extractVocab(tokens)
+      val edges = LDA.edgesFromTextDocLines(sc, lines, vocab, vocabLookup)
+      val model = new LDA(edges, nTopics=2)
+      model.iterate(20)
+      val topWords = model.topWords(2)
+      val t1w1 = vocab(topWords(0)(0)._2.toInt)
+      val t1w2 = vocab(topWords(0)(1)._2.toInt)
+      val t2w1 = vocab(topWords(1)(0)._2.toInt)
+      val t2w2 = vocab(topWords(1)(1)._2.toInt)
+      val t1words = Array(t1w1, t1w2).sorted.mkString(" ")
+      val t2words = Array(t2w1, t2w2).sorted.mkString(" ")
+      val wordsExpect1 = Array("system", "user").mkString(" ")
+      val wordsExpect2 = Array("graph", "trees").mkString(" ")
+      val t1check = t1words == wordsExpect1 && t1words != wordsExpect2 ||
+        t1words == wordsExpect2 && t1words != wordsExpect1
+      val t2check = t2words == wordsExpect1 && t2words != wordsExpect2 ||
+        t2words == wordsExpect2 && t2words != wordsExpect1
+      t1check should be (true)
+      t2check should be (true)
     }
   }
   test("Vocabulary extraction") {

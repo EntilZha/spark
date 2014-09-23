@@ -17,6 +17,7 @@ object LDA {
 
   class Posterior (docs: VertexRDD[Factor], words: VertexRDD[Factor])
 
+  // For memory efficiency/garbage collection, don't allocate a new Factor, return one of the originals
   def addEq(a: Factor, b: Factor): Factor = {
     assert(a.size == b.size)
     var i = 0
@@ -27,6 +28,7 @@ object LDA {
     a
   }
 
+  // For memory efficiency/garbage collection, don't allocate a new Factor, return the original
   def addEq(a: Factor, t: TopicId): Factor = { a(t) += 1; a }
 
   def makeFactor(nTopics: Int, topic: TopicId): Factor = {

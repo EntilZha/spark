@@ -34,6 +34,14 @@ object LDA {
     f(topic) += 1
     f
   }
+  def extractVocab(tokens:RDD[String]): (Array[String], Map[String, Int]) = {
+    val vocab = tokens.distinct().collect()
+    var vocabLookup:Map[String, Int] = Map()
+    for (i <- 0 to vocab.length - 1) {
+      vocabLookup += (vocab(i) -> i)
+    }
+    return (vocab, vocabLookup)
+  }
 } // end of LDA singleton
 
 

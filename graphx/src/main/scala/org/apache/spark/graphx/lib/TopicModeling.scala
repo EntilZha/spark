@@ -1,5 +1,6 @@
 package org.apache.spark.graphx.algorithms
 
+import akka.remote.transport.ThrottlerTransportAdapter.Direction.Both
 import org.apache.spark.graphx.PartitionStrategy.{CanonicalRandomVertexCut, EdgePartition2D, EdgePartition1D, RandomVertexCut}
 import org.apache.spark.graphx._
 import org.apache.spark.rdd.RDD
@@ -107,24 +108,22 @@ object LDA {
 
 
 
-class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
+class LDA(tokens: RDD[(LDA.WordId, LDA.DocId)],
           val nTopics: Int = 100,
           val alpha: Double = 0.1,
           val beta: Double = 0.1) {
-  import LDA._
-
   private val sc = tokens.sparkContext
 
   /**
    * The bipartite terms by document graph.
    */
-  var graph: Graph[Factor, TopicId] = {
+  var graph: Graph[LDA.Factor, LDA.TopicId] = {
     // To setup a bipartite graph it is necessary to ensure that the document and
     // word ids are in a different namespace
     val renumbered = tokens.map { case (wordId, docId) =>
       assert(wordId >= 0)
       assert(docId >= 0)
-      val newDocId: DocId = -(docId + 1L)
+      val newDocId: LDA.DocId = -(docId + 1L)
       (wordId, newDocId)
     }
     val nT = nTopics
@@ -134,9 +133,9 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         iter.map(e => gen.nextInt(nT))
       }
     // Compute the topic histograms (factors) for each word and document
-    val newCounts = gTmp.mapReduceTriplets[Factor](
-      e => Iterator((e.srcId, makeFactor(nT, e.attr)), (e.dstId, makeFactor(nT, e.attr))),
-      (a, b) => addEq(a,b) )
+    val newCounts = gTmp.mapReduceTriplets[LDA.Factor](
+      e => Iterator((e.srcId, LDA.makeFactor(nT, e.attr)), (e.dstId, LDA.makeFactor(nT, e.attr))),
+      (a, b) => LDA.addEq(a,b) )
     // Update the graph with the factors
     gTmp.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
     // Trigger computation of the topic counts
@@ -161,7 +160,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    * The total counts for each topic
    */
   var totalHist = graph.edges.map(e => e.attr)
-    .aggregate(new Factor(nTopics))(LDA.addEq(_, _), LDA.addEq(_, _))
+    .aggregate(new LDA.Factor(nTopics))(LDA.addEq(_, _), LDA.addEq(_, _))
   assert(totalHist.sum == nTokens)
 
   /**
@@ -190,10 +189,10 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       val nw = nWords
       // Define the function to sample a single token
       // I had originally used def sampleToken but this leads to closure capture of the LDA class (an abomination).
-      val sampleToken = (gen: java.util.Random, triplet: EdgeTriplet[Factor, TopicId]) => {
-        val wHist: Array[Count] = triplet.srcAttr
-        val dHist: Array[Count] = triplet.dstAttr
-        val totalHist: Array[Count] = totalHistbcast.value
+      val sampleToken = (gen: java.util.Random, triplet: EdgeTriplet[LDA.Factor, LDA.TopicId]) => {
+        val wHist: Array[LDA.Count] = triplet.srcAttr
+        val dHist: Array[LDA.Count] = triplet.dstAttr
+        val totalHist: Array[LDA.Count] = totalHistbcast.value
         val oldTopic = triplet.attr
         assert(wHist(oldTopic) > 0)
         assert(dHist(oldTopic) > 0)
@@ -226,9 +225,9 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         // Return the new topic
         newTopic
       }
-      val sToken = (gen:java.util.Random, triplet:EdgeTriplet[Factor, TopicId]) => {
-        val wHist: Array[Count] = triplet.srcAttr
-        val dHist: Array[Count] = triplet.dstAttr
+      val sToken = (gen:java.util.Random, triplet:EdgeTriplet[LDA.Factor, LDA.TopicId]) => {
+        triplet.srcAttr
+        triplet.dstAttr
         0
       }
 
@@ -241,13 +240,13 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           assert(token.dstAttr != null)
         }
       }
-      graph = graph.mapTriplets { (pid, iter) =>
+      graph = graph.mapTriplets({ (pid, iter) =>
         val gen1 = new java.util.Random(parts * interIter + pid)
         val gen2 = new java.util.Random(parts * interIter + pid)
-        iter.filter(token => token.srcAttr != null).map { token =>
+        iter.map { token =>
           assert(token.srcAttr != null)
           assert(token.dstAttr != null)
-          sToken(gen2, token)
+          //sToken(gen2, token)
         }
         iter.map { token =>
           assert(token != null)
@@ -258,33 +257,33 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           //assert(ret1 == ret2)
           ret1
         }
-      }
+      })
 
       // Update the counts
-      val newCounts = graph.mapReduceTriplets[Factor](
-        e => Iterator((e.srcId, makeFactor(nt, e.attr)), (e.dstId, makeFactor(nt, e.attr))),
-        (a, b) => { addEq(a,b); a } )
+      val newCounts = graph.mapReduceTriplets[LDA.Factor](
+        e => Iterator((e.srcId, LDA.makeFactor(nt, e.attr)), (e.dstId, LDA.makeFactor(nt, e.attr))),
+        (a, b) => { LDA.addEq(a,b); a }, activeSetOpt = Option(new Tuple2(graph.vertices, EdgeDirection.Both)))
       graph = graph.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
 
       // Recompute the global counts (the actual action)
       totalHist = graph.edges.map(e => e.attr)
-        .aggregate(new Factor(nt))(LDA.addEq(_, _), LDA.addEq(_, _))
+        .aggregate(new LDA.Factor(nt))(LDA.addEq(_, _), LDA.addEq(_, _))
       assert(totalHist.sum == nTokens)
 
       internalIteration += 1
     }
   } // end of iterate
 
-  def topWords(k: Int): Array[Array[(Count, WordId)]] = {
+  def topWords(k: Int): Array[Array[(LDA.Count, LDA.WordId)]] = {
     val nt = nTopics
     graph.vertices.filter {
       case (vid, c) => vid >= 0
     }.mapPartitions { items =>
-      val queues = Array.fill(nt)(new BoundedPriorityQueue[(Count, WordId)](k))
+      val queues = Array.fill(nt)(new BoundedPriorityQueue[(LDA.Count, LDA.WordId)](k))
       for ((wordId, factor) <- items) {
         var t = 0
         while (t < nt) {
-          val tpl: (Count, WordId) = (factor(t), wordId)
+          val tpl: (LDA.Count, LDA.WordId) = (factor(t), wordId)
           queues(t) += tpl
           t += 1
         }
@@ -296,7 +295,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     }.map ( q => q.toArray )
   } // end of TopWords
 
-  def posterior: Posterior = {
+  def posterior: LDA.Posterior = {
     graph.cache()
     val words = graph.vertices.filter { case (vid, _) => vid >= 0 }
     val docs =  graph.vertices.filter { case (vid,_) => vid < 0 }

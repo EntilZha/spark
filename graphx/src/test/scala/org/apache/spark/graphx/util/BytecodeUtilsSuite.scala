@@ -17,6 +17,7 @@
 
 package org.apache.spark.graphx.util
 
+import org.apache.spark.graphx.util.BytecodeUtilsSuite.TestRefClass
 import org.scalatest.FunSuite
 
 
@@ -89,6 +90,16 @@ class BytecodeUtilsSuite extends FunSuite {
     assert(!BytecodeUtils.invokedMethod(c1, classOf[TestClass], "bar"))
     assert(BytecodeUtils.invokedMethod(c1, classOf[TestClass], "baz"))
   }
+  test("closure calling object method accessing object attributes") {
+    val c1:TestRefClass => (String, String) = TestRefClass.foo
+    assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "arr"))
+    assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "baz"))
+  }
+  test("closure calling object method accessing object attributes within map closure") {
+    val c1:Iterable[TestRefClass] => Iterable[(String, String)] = TestRefClass.foomap
+    assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "arr"))
+    assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "baz"))
+  }
 
   // The following doesn't work yet, because the byte code doesn't contain any information
   // about what exactly "c" is.
@@ -106,5 +117,17 @@ class BytecodeUtilsSuite extends FunSuite {
 object BytecodeUtilsSuite {
   class TestClass(val foo: Int, val bar: Long) {
     def baz: Boolean = false
+  }
+  class TestRefClass(val foo: Array[Int]) {
+    def baz: Boolean = false
+    def arr: Array[Int] = Array(1)
+  }
+  object TestRefClass {
+    def foo(e:TestRefClass): (String, String) = {
+      (e.baz.toString, e.arr(0).toString)
+    }
+    def foomap(iter:Iterable[TestRefClass]): Iterable[(String, String)] = {
+      iter.map(e => (e.baz.toString, e.arr(0).toString))
+    }
   }
 }

@@ -99,7 +99,7 @@ object LDA {
       cumsum += conditional(t)
     }
     val newTopic = t
-    return newTopic
+    newTopic
   }
 } // end of LDA singleton
 
@@ -226,6 +226,11 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         // Return the new topic
         newTopic
       }
+      val sToken = (gen:java.util.Random, triplet:EdgeTriplet[Factor, TopicId]) => {
+        val wHist: Array[Count] = triplet.srcAttr
+        val dHist: Array[Count] = triplet.dstAttr
+        0
+      }
 
       // Resample all the tokens
       val parts = graph.edges.partitions.size
@@ -239,10 +244,10 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       graph = graph.mapTriplets { (pid, iter) =>
         val gen1 = new java.util.Random(parts * interIter + pid)
         val gen2 = new java.util.Random(parts * interIter + pid)
-        iter.map { token =>
+        iter.filter(token => token.srcAttr != null).map { token =>
           assert(token.srcAttr != null)
           assert(token.dstAttr != null)
-          sampleToken(gen2, token)
+          sToken(gen2, token)
         }
         iter.map { token =>
           assert(token != null)

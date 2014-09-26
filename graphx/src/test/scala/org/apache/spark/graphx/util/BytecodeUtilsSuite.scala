@@ -95,7 +95,26 @@ class BytecodeUtilsSuite extends FunSuite {
     assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "arr"))
     assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "baz"))
   }
-  test("closure calling object method accessing object attributes within map closure") {
+  test("closure calling object method within a map. Within map accessing object attributes with inline accessor") {
+    val c1:Iterable[TestRefClass] => Iterable[(String, String)] = {
+      val access:TestRefClass => (String, String) = e => (e.baz.toString, e.arr(0).toString)
+      iter => {
+        iter.map(e => access(e))
+      }
+    }
+    assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "arr"))
+    assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "baz"))
+  }
+  test("closure calling object method within an inline map. Within map accessing object attributes with object singleton accessor") {
+    val c1:Iterable[TestRefClass] => Iterable[(String, String)] = {
+      iter => {
+        iter.map(e => (e.baz.toString, e.arr(0).toString))
+      }
+    }
+    assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "arr"))
+    assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "baz"))
+  }
+  test("closure calling object method within a predefined map. Within map accessing object attributes object singleton accessor") {
     val c1:Iterable[TestRefClass] => Iterable[(String, String)] = TestRefClass.foomap
     assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "arr"))
     assert(BytecodeUtils.invokedMethod(c1, classOf[TestRefClass], "baz"))

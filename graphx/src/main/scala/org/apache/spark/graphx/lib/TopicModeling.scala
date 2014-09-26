@@ -230,16 +230,27 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       // Resample all the tokens
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
+      graph.mapTriplets {(_, iter) =>
+        iter.map { token =>
+          assert(token.srcAttr != null)
+          assert(token.dstAttr != null)
+        }
+      }
       graph = graph.mapTriplets { (pid, iter) =>
         val gen1 = new java.util.Random(parts * interIter + pid)
         val gen2 = new java.util.Random(parts * interIter + pid)
+        iter.map { token =>
+          assert(token.srcAttr != null)
+          assert(token.dstAttr != null)
+          sampleToken(gen2, token)
+        }
         iter.map { token =>
           assert(token != null)
           assert(token.srcAttr != null)
           assert(token.dstAttr != null)
           val ret1 = LDA.sampleToken(gen1, token, totalHistbcast, nt, a, b, nw)
-          val ret2 = sampleToken(gen2, token)
-          assert(ret1 == ret2)
+          //sampleToken(gen2, token)
+          //assert(ret1 == ret2)
           ret1
         }
       }

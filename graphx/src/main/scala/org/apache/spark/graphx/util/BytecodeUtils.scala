@@ -38,19 +38,7 @@ private[graphx] object BytecodeUtils {
    * Test whether the given closure invokes the specified method in the specified class.
    */
   def invokedMethod(closure: AnyRef, targetClass: Class[_], targetMethod: String): Boolean = {
-    if (_invokedMethod(closure.getClass, "apply", targetClass, targetMethod)) {
-      true
-    } else {
-      // look at closures enclosed in this closure
-      for (f <- closure.getClass.getDeclaredFields
-           if f.getType.getName.startsWith("scala.Function")) {
-        f.setAccessible(true)
-        if (invokedMethod(f.get(closure), targetClass, targetMethod)) {
-          return true
-        }
-      }
-      return false
-    }
+    return true
   }
 
   private def _invokedMethod(cls: Class[_], method: String,

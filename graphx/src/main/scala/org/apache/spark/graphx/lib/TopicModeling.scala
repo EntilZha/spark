@@ -101,11 +101,7 @@ object LDA {
     val newTopic = t
     return newTopic
   }
-} // end of LDA singleton
-
-
-
-
+}
 
 class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           val nTopics: Int = 100,
@@ -113,12 +109,13 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           val beta: Double = 0.1) {
   import LDA._
 
+  val timer = new TimeTracker()
   private val sc = tokens.sparkContext
 
   /**
    * The bipartite terms by document graph.
    */
-  var graph: Graph[Factor, TopicId] = {
+  private var graph: Graph[Factor, TopicId] = {
     // To setup a bipartite graph it is necessary to ensure that the document and
     // word ids are in a different namespace
     val renumbered = tokens.map { case (wordId, docId) =>
@@ -170,7 +167,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    * once and then once for each iteration
    */
   private var internalIteration = 1
-
+  setupTime = System.nanoTime() - setupTime
 
   /**
    * Run the gibbs sampler
@@ -180,7 +177,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   def iterate(nIter: Int = 1) {
     // Run the sampling
     for (i <- 0 until nIter) {
-      println("Starting iteration: " + i.toString)
+      val iterStartTime = System.currentTimeMillis()
       // Broadcast the topic histogram
       val totalHistbcast = sc.broadcast(totalHist)
       // Shadowing because scala's closure capture is an abomination
@@ -188,59 +185,14 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       val b = beta
       val nt = nTopics
       val nw = nWords
-      // Define the function to sample a single token
-      // I had originally used def sampleToken but this leads to closure capture of the LDA class (an abomination).
-      val sampleToken = (gen: java.util.Random, triplet: EdgeTriplet[Factor, TopicId]) => {
-        val wHist: Array[Count] = triplet.srcAttr
-        val dHist: Array[Count] = triplet.dstAttr
-        val totalHist: Array[Count] = totalHistbcast.value
-        val oldTopic = triplet.attr
-        assert(wHist(oldTopic) > 0)
-        assert(dHist(oldTopic) > 0)
-        assert(totalHist(oldTopic) > 0)
-        // Construct the conditional
-        val conditional = new Array[Double](nt)
-        var t = 0
-        var conditionalSum = 0.0
-        while (t < conditional.size) {
-          val cavityOffset = if (t == oldTopic) 1 else 0
-          val w = wHist(t) - cavityOffset
-          val d = dHist(t) - cavityOffset
-          val total = totalHist(t) - cavityOffset
-          conditional(t) = (a + d) * (b + w) / (b * nw + total)
-          conditionalSum += conditional(t)
-          t += 1
-        }
-        assert(conditionalSum > 0.0)
-        // Generate a random number between [0, conditionalSum)
-        val u = gen.nextDouble() * conditionalSum
-        assert(u < conditionalSum)
-        // Draw the new topic from the multinomial
-        t = 0
-        var cumsum = conditional(t)
-        while(cumsum < u) {
-          t += 1
-          cumsum += conditional(t)
-        }
-        val newTopic = t
-        // Return the new topic
-        newTopic
-      }
 
       // Resample all the tokens
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
       graph = graph.mapTriplets { (pid, iter) =>
-        //val gen1 = new java.util.Random(parts * interIter + pid)
-        val gen2 = new java.util.Random(parts * interIter + pid)
+        val gen = new java.util.Random(parts * interIter + pid)
         iter.map { token =>
-          assert(token != null)
-          assert(token.srcAttr != null)
-          assert(token.dstAttr != null)
-          //val ret1 = LDA.sampleToken(gen1, token, totalHistbcast, nt, a, b, nw)
-          val ret2 = sampleToken(gen2, token)
-          //assert(ret1 == ret2)
-          ret2
+          LDA.sampleToken(gen, token, totalHistbcast, nt, a, b, nw)
         }
       }
 
@@ -256,6 +208,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       assert(totalHist.sum == nTokens)
 
       internalIteration += 1
+      iterationTimes :+ System.currentTimeMillis() - iterStartTime
     }
   } // end of iterate
 
@@ -285,6 +238,10 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     val words = graph.vertices.filter { case (vid, _) => vid >= 0 }
     val docs =  graph.vertices.filter { case (vid,_) => vid < 0 }
     new LDA.Posterior(words, docs)
+  }
+
+  def performanceStatistics() = {
+
   }
 
 } // end of TopicModeling

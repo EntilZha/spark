@@ -17,8 +17,8 @@
 
 package org.apache.spark.graphx.lib
 
-import org.apache.spark.graphx.algorithms.LDA
-import org.apache.spark.graphx.algorithms.LDA.{TopicId, DocId, WordId, Count, Factor}
+import org.apache.spark.graphx.lib.LDA
+import org.apache.spark.graphx.lib.LDA.{TopicId, DocId, WordId, Count, Factor}
 import org.scalatest.{FunSuite, Matchers}
 
 import org.apache.spark.SparkContext

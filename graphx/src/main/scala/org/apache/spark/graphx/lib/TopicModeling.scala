@@ -1,11 +1,13 @@
-package org.apache.spark.graphx.algorithms
+package org.apache.spark.graphx.lib
 
-import org.apache.spark.graphx.PartitionStrategy.{CanonicalRandomVertexCut, EdgePartition2D, EdgePartition1D, RandomVertexCut}
-import org.apache.spark.graphx._
-import org.apache.spark.rdd.RDD
-import org.apache.spark._
+import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.broadcast._
+import org.apache.spark.graphx._
+import org.apache.spark.graphx.PartitionStrategy.{CanonicalRandomVertexCut, EdgePartition1D, EdgePartition2D, RandomVertexCut}
+import org.apache.spark.graphx.util.TimeTracker
+import org.apache.spark.rdd.RDD
 import org.apache.spark.util.BoundedPriorityQueue
+import org.apache.log4j.{LogManager, Level, Logger}
 
 object LDA {
   type DocId = VertexId
@@ -106,10 +108,12 @@ object LDA {
 class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           val nTopics: Int = 100,
           val alpha: Double = 0.1,
-          val beta: Double = 0.1) {
-  import LDA._
+          val beta: Double = 0.1) extends Serializable with Logging {
+  import org.apache.spark.graphx.lib.LDA._
 
   val timer = new TimeTracker()
+  timer.start("setup")
+  logInfo("Starting LDA setup")
   private val sc = tokens.sparkContext
 
   /**
@@ -167,7 +171,8 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    * once and then once for each iteration
    */
   private var internalIteration = 1
-  setupTime = System.nanoTime() - setupTime
+  logInfo("LDA setup finished")
+  timer.stop("setup")
 
   /**
    * Run the gibbs sampler
@@ -176,8 +181,10 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    */
   def iterate(nIter: Int = 1) {
     // Run the sampling
+    timer.start("run")
+    logInfo("Starting LDA Iterations...")
     for (i <- 0 until nIter) {
-      val iterStartTime = System.currentTimeMillis()
+      logInfo(s"Iteration $i of $nIter...")
       // Broadcast the topic histogram
       val totalHistbcast = sc.broadcast(totalHist)
       // Shadowing because scala's closure capture is an abomination
@@ -208,9 +215,11 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       assert(totalHist.sum == nTokens)
 
       internalIteration += 1
-      iterationTimes :+ System.currentTimeMillis() - iterStartTime
     }
-  } // end of iterate
+    timer.stop("run")
+    logInfo("LDA Finishing...")
+    logPerformanceStatistics()
+  }
 
   def topWords(k: Int): Array[Array[(Count, WordId)]] = {
     val nt = nTopics
@@ -240,8 +249,25 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     new LDA.Posterior(words, docs)
   }
 
-  def performanceStatistics() = {
+  def logPerformanceStatistics() = {
+    logInfo("LDA Model Parameters and Information")
+    logInfo(s"Number of Documents: $nDocs")
+    logInfo(s"Number of Words: $nWords")
+    logInfo(s"Number of Tokens: $nTokens")
+    logInfo("Running Time Statistics")
+    logInfo(s"Setup: $setupTime s")
+    logInfo(s"Run: $runTime s")
+    logInfo(s"Total: $totalTime s")
+  }
 
+  private def setupTime: Double = {
+    timer.getSeconds("setup")
+  }
+  private def runTime: Double = {
+    timer.getSeconds("run")
+  }
+  private def totalTime: Double = {
+    timer.getSeconds("setup") + timer.getSeconds("run")
   }
 
 } // end of TopicModeling

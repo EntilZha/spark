@@ -19,6 +19,12 @@ package org.apache.spark.graphx.util
 
 import scala.collection.mutable.{HashMap => MutableHashMap}
 
+private[graphx] object TimeTracker {
+  def nanosecondsToSeconds(v: Double): Double ={
+    v / 1e9
+  }
+}
+
 /**
  * Time tracker implementation which holds labeled timers.
  */

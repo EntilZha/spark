@@ -1,5 +1,6 @@
 package org.apache.spark.graphx.lib
 
+import org.apache.commons.math3.special.Gamma
 import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.broadcast._
 import org.apache.spark.graphx._
@@ -8,6 +9,8 @@ import org.apache.spark.graphx.util.TimeTracker
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.BoundedPriorityQueue
 import org.apache.log4j.{LogManager, Level, Logger}
+
+import scala.collection.mutable.ListBuffer
 
 object LDA {
   type DocId = VertexId
@@ -38,9 +41,9 @@ object LDA {
     f(topic) += 1
     f
   }
-  def extractVocab(tokens:RDD[String]): (Array[String], Map[String, WordId]) = {
+  def extractVocab(tokens:RDD[String]): (Array[String], scala.collection.mutable.Map[String, WordId]) = {
     val vocab = tokens.distinct().collect()
-    var vocabLookup:Map[String, WordId] = Map()
+    var vocabLookup = scala.collection.mutable.Map[String, WordId]()
     for (i <- 0 to vocab.length - 1) {
       vocabLookup += (vocab(i) -> i)
     }
@@ -81,7 +84,7 @@ object LDA {
     var t = 0
     var conditionalSum = 0.0
     while (t < conditional.size) {
-      val cavityOffset = if (t == oldTopic)1 else 0
+      val cavityOffset = if (t == oldTopic) 1 else 0
       val w = wHist(t) - cavityOffset
       val d = dHist(t) - cavityOffset
       val total = totalHist(t) - cavityOffset
@@ -105,10 +108,19 @@ object LDA {
   }
 }
 
+/**
+ * LDA contains the model for topic modeling using Latent Dirichlet Allocation
+ * @param tokens RDD of edges
+ * @param nTopics Number of topics
+ * @param alpha Model parameter
+ * @param beta Model parameter
+ * @param logIter Interval for logging, if set to 0 only logs at model return
+ */
 class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           val nTopics: Int = 100,
           val alpha: Double = 0.1,
-          val beta: Double = 0.1) extends Serializable with Logging {
+          val beta: Double = 0.1,
+          val logIter: Int = 0) extends Serializable with Logging {
   import org.apache.spark.graphx.lib.LDA._
 
   val timer = new TimeTracker()
@@ -143,15 +155,17 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     // Trigger computation of the topic counts
   }
 
+  def wordVertices: VertexRDD[LDA.Factor] = graph.vertices.filter{ case (vid, c) => vid >= 0 }
+  def docVertices: VertexRDD[LDA.Factor] = graph.vertices.filter{ case (vid, c) => vid < 0 }
   /**
    * The number of unique words in the corpus
    */
-  val nWords = graph.vertices.filter{ case (vid, c) => vid >= 0 }.count()
+  val nWords = wordVertices.count()
 
   /**
    * The number of documents in the corpus
    */
-  val nDocs = graph.vertices.filter{ case (vid, c) => vid < 0 }.count()
+  val nDocs = docVertices.count()
 
   /**
    * The number of tokens
@@ -164,6 +178,12 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   var totalHist = graph.edges.map(e => e.attr)
     .aggregate(new Factor(nTopics))(LDA.addEq(_, _), LDA.addEq(_, _))
   assert(totalHist.sum == nTokens)
+
+  val broadcastTimes = new ListBuffer[Long]()
+  val resampleTimes = new ListBuffer[Long]()
+  val updateCountsTimes = new ListBuffer[Long]()
+  val globalCountsTimes = new ListBuffer[Long]()
+  val likelihoods = new ListBuffer[Double]()
 
   /**
    * The internal iteration tracks the number of times the random number
@@ -185,8 +205,17 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     logInfo("Starting LDA Iterations...")
     for (i <- 0 until nIter) {
       logInfo(s"Iteration $i of $nIter...")
+      if (logIter != 0 && i % logIter == 0) {
+        val likelihood = logLikelihood()
+        likelihoods += likelihood
+      }
+      var tempTimer:Long = 0
       // Broadcast the topic histogram
+      tempTimer = System.nanoTime()
       val totalHistbcast = sc.broadcast(totalHist)
+      if (logIter != 0) {
+        broadcastTimes += System.nanoTime() - tempTimer
+      }
       // Shadowing because scala's closure capture is an abomination
       val a = alpha
       val b = beta
@@ -194,6 +223,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       val nw = nWords
 
       // Resample all the tokens
+      tempTimer = System.nanoTime()
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
       graph = graph.mapTriplets { (pid, iter) =>
@@ -202,19 +232,34 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           LDA.sampleToken(gen, token, totalHistbcast, nt, a, b, nw)
         }
       }
+      if (logIter != 0) {
+        resampleTimes += System.nanoTime() - tempTimer
+      }
 
       // Update the counts
+      tempTimer = System.nanoTime()
       val newCounts = graph.mapReduceTriplets[Factor](
         e => Iterator((e.srcId, makeFactor(nt, e.attr)), (e.dstId, makeFactor(nt, e.attr))),
         (a, b) => { addEq(a,b); a } )
       graph = graph.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
+      if (logIter != 0) {
+        updateCountsTimes += System.nanoTime() - tempTimer
+      }
 
       // Recompute the global counts (the actual action)
+      tempTimer = System.nanoTime()
       totalHist = graph.edges.map(e => e.attr)
         .aggregate(new Factor(nt))(LDA.addEq(_, _), LDA.addEq(_, _))
       assert(totalHist.sum == nTokens)
+      if (logIter != 0) {
+        globalCountsTimes += System.nanoTime() - tempTimer
+      }
 
       internalIteration += 1
+    }
+    if (logIter != 0) {
+      val likelihood = logLikelihood()
+      likelihoods += likelihood
     }
     timer.stop("run")
     logInfo("LDA Finishing...")
@@ -248,8 +293,34 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     val docs =  graph.vertices.filter { case (vid,_) => vid < 0 }
     new LDA.Posterior(words, docs)
   }
+  def logLikelihood(): Double = {
+    val nw = nWords
+    val nt = nTopics
+    val nd = nDocs
+    val a = alpha
+    val b = beta
+    val logAlpha = Gamma.logGamma(a)
+    val logBeta = Gamma.logGamma(b)
+    val logPWGivenZ =
+      nTopics * (Gamma.logGamma(nw * b) - nw * logBeta) -
+      totalHist.map(v => Gamma.logGamma(v + nw * b)).reduce(_ + _) +
+      wordVertices.map({ case (id, f) => f.map(v => Gamma.logGamma(v + b)).reduce(_ + _)}).reduce(_ + _)
+    val logPZ =
+      nd * (Gamma.logGamma(nt * a) - nt * logAlpha) +
+      docVertices.map({ case (id, f) =>
+        f.map(v => Gamma.logGamma(v + a)).reduce(_ + _) - Gamma.logGamma(nt * a + f.reduce(_ + _))
+      }).reduce(_ + _)
+    logPWGivenZ + logPZ
+  }
 
   def logPerformanceStatistics() = {
+    val broadcastTime = broadcastTimes.reduce(_ + _) / 1e9
+    val resampleTime = resampleTimes.reduce(_ + _) / 1e9
+    val updateCountsTime = updateCountsTimes.reduce(_ + _) / 1e9
+    val globalCountsTime = globalCountsTimes.reduce(_ + _) / 1e9
+    val likelihoodList = likelihoods.toList
+    val likelihoodString = likelihoodList.mkString(",")
+    val finalLikelihood = likelihoodList.last
     logInfo("LDA Model Parameters and Information")
     logInfo(s"Number of Documents: $nDocs")
     logInfo(s"Number of Words: $nWords")
@@ -258,6 +329,13 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     logInfo(s"Setup: $setupTime s")
     logInfo(s"Run: $runTime s")
     logInfo(s"Total: $totalTime s")
+    logInfo(s"Broadcast Time: $broadcastTime")
+    logInfo(s"Resample Time: $resampleTime")
+    logInfo(s"Update Counts Time: $updateCountsTime")
+    logInfo(s"Global Counts Time: $globalCountsTime")
+    logInfo("Machine Learning Performance")
+    logInfo(s"Likelihoods: $likelihoodString")
+    logInfo(s"Final Log Likelihood: $finalLikelihood")
   }
 
   private def setupTime: Double = {

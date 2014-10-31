@@ -31,7 +31,7 @@ class TopicModelingSuite extends FunSuite with LocalSparkContext with Matchers {
     withSpark { sc =>
       val lines = sc.textFile("data/lda-mini-test.txt")
       val tokens = lines.flatMap(line => line.split(" "))
-      val (vocab:Array[String], vocabLookup:Map[String, WordId]) = LDA.extractVocab(tokens)
+      val (vocab:Array[String], vocabLookup:scala.collection.mutable.Map[String, WordId]) = LDA.extractVocab(tokens)
       // Extract the edges then reverse the wordId and docId to let us use groupByKey
       val edges:RDD[(LDA.WordId, LDA.DocId)] = LDA.edgesFromTextDocLines(lines, vocab, vocabLookup)
         .map{ case (wordId:WordId, docId:DocId) =>

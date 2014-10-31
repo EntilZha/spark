@@ -51,7 +51,7 @@ object LDA {
   }
   def edgesFromTextDocLines(lines:RDD[String],
                             vocab:Array[String],
-                            vocabLookup:Map[String, WordId],
+                            vocabLookup:scala.collection.mutable.Map[String, WordId],
                             delimiter:String=" "): RDD[(LDA.WordId, LDA.DocId)] = {
     val sc = lines.sparkContext
     val numDocs = lines.count()
@@ -118,7 +118,9 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           val nTopics: Int = 100,
           val alpha: Double = 0.1,
           val beta: Double = 0.1,
-          val logIter: Int = 0) extends Serializable with Logging {
+          val loggingInterval: Int = 0,
+          val loggingLikelihood: Boolean = false,
+          val loggingTime: Boolean = false) extends Serializable with Logging {
   import org.apache.spark.graphx.lib.LDA._
 
   val timer = new TimeTracker()
@@ -202,7 +204,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     logInfo("Starting LDA Iterations...")
     for (i <- 0 until nIter) {
       logInfo(s"Iteration $i of $nIter...")
-      if (logIter != 0 && i % logIter == 0) {
+      if (loggingLikelihood && i % loggingInterval == 0) {
         val likelihood = logLikelihood()
         likelihoods += likelihood
       }
@@ -226,7 +228,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           LDA.sampleToken(gen, token, totalHistbcast.value, nt, a, b, nw)
         }
       }
-      if (logIter != 0) {
+      if (loggingTime && i % loggingInterval == 0) {
         graph.cache.triplets.count()
         resampleTimes += System.nanoTime() - tempTimer
       }
@@ -237,7 +239,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         e => Iterator((e.srcId, makeFactor(nt, e.attr)), (e.dstId, makeFactor(nt, e.attr))),
         (a, b) => { addEq(a,b); a } )
       graph = graph.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
-      if (logIter != 0) {
+      if (loggingTime && i % loggingInterval == 0) {
         graph.cache.triplets.count()
         updateCountsTimes += System.nanoTime() - tempTimer
       }
@@ -247,16 +249,14 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       totalHist = graph.edges.map(e => e.attr)
         .aggregate(new Factor(nt))(LDA.addEq(_, _), LDA.addEq(_, _))
       assert(totalHist.sum == nTokens)
-      if (logIter != 0) {
+      if (loggingTime && i % loggingInterval == 0) {
         globalCountsTimes += System.nanoTime() - tempTimer
       }
 
       internalIteration += 1
     }
-    if (logIter != 0) {
-      val likelihood = logLikelihood()
-      likelihoods += likelihood
-    }
+    val likelihood = logLikelihood()
+    likelihoods += likelihood
     timer.stop("run")
     logInfo("LDA Finishing...")
     logPerformanceStatistics()
@@ -330,9 +330,9 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   }
 
   def logPerformanceStatistics() = {
-    val resampleTime = resampleTimes.reduce(_ + _) / 1e9
-    val updateCountsTime = updateCountsTimes.reduce(_ + _) / 1e9
-    val globalCountsTime = globalCountsTimes.reduce(_ + _) / 1e9
+    val resampleTime = if (loggingTime) resampleTimes.reduce(_ + _) / 1e9 else 0
+    val updateCountsTime = if (loggingTime) updateCountsTimes.reduce(_ + _) / 1e9 else 0
+    val globalCountsTime = if (loggingTime) globalCountsTimes.reduce(_ + _) / 1e9 else 0
     val likelihoodList = likelihoods.toList
     val likelihoodString = likelihoodList.mkString(",")
     val finalLikelihood = likelihoodList.last
@@ -344,11 +344,15 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     logInfo(s"Setup: $setupTime s")
     logInfo(s"Run: $runTime s")
     logInfo(s"Total: $totalTime s")
-    logInfo(s"Resample Time: $resampleTime")
-    logInfo(s"Update Counts Time: $updateCountsTime")
-    logInfo(s"Global Counts Time: $globalCountsTime")
+    if (loggingTime) {
+      logInfo(s"Resample Time: $resampleTime")
+      logInfo(s"Update Counts Time: $updateCountsTime")
+      logInfo(s"Global Counts Time: $globalCountsTime")
+    }
     logInfo("Machine Learning Performance")
-    logInfo(s"Likelihoods: $likelihoodString")
+    if (loggingLikelihood) {
+      logInfo(s"Likelihoods: $likelihoodString")
+    }
     logInfo(s"Final Log Likelihood: $finalLikelihood")
   }
 

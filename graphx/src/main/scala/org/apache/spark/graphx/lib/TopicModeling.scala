@@ -179,7 +179,6 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     .aggregate(new Factor(nTopics))(LDA.addEq(_, _), LDA.addEq(_, _))
   assert(totalHist.sum == nTokens)
 
-  val broadcastTimes = new ListBuffer[Long]()
   val resampleTimes = new ListBuffer[Long]()
   val updateCountsTimes = new ListBuffer[Long]()
   val globalCountsTimes = new ListBuffer[Long]()
@@ -211,11 +210,8 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       }
       var tempTimer:Long = 0
       // Broadcast the topic histogram
-      tempTimer = System.nanoTime()
       val totalHistbcast = sc.broadcast(totalHist)
-      if (logIter != 0) {
-        broadcastTimes += System.nanoTime() - tempTimer
-      }
+
       // Shadowing because scala's closure capture is an abomination
       val a = alpha
       val b = beta
@@ -233,6 +229,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         }
       }
       if (logIter != 0) {
+        graph.cache.triplets.count()
         resampleTimes += System.nanoTime() - tempTimer
       }
 
@@ -241,8 +238,9 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       val newCounts = graph.mapReduceTriplets[Factor](
         e => Iterator((e.srcId, makeFactor(nt, e.attr)), (e.dstId, makeFactor(nt, e.attr))),
         (a, b) => { addEq(a,b); a } )
-      graph = graph.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
+      graph = graph.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }//.cache
       if (logIter != 0) {
+        graph.cache.triplets.count()
         updateCountsTimes += System.nanoTime() - tempTimer
       }
 
@@ -293,6 +291,26 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     val docs =  graph.vertices.filter { case (vid,_) => vid < 0 }
     new LDA.Posterior(words, docs)
   }
+
+  /**
+   * Calculates the log likelihood according to:
+   * \mathcal{L}( w | z) & = T * \left( \log\Gamma(W * \beta) - W * \log\Gamma(\beta) \right) + \\
+    & \sum_{t} \left( \left(\sum_{w} \log\Gamma(N_{wt} + \beta)\right) -
+           \log\Gamma\left( W * \beta + \sum_{w} N_{wt}  \right) \right) \\
+    & = T * \left( \log\Gamma(W * \beta) - W * \log\Gamma(\beta) \right) -
+        \sum_{t} \log\Gamma\left( W * \beta + N_{t}  \right) + \\
+    & \sum_{w} \sum_{t} \log\Gamma(N_{wt} + \beta)   \\
+    \\
+    \mathcal{L}(z) & = D * \left(\log\Gamma(T * \alpha) - T * \log\Gamma(\alpha) \right) + \\
+    & \sum_{d} \left( \left(\sum_{t}\log\Gamma(N_{td} + \alpha)\right) -
+        \log\Gamma\left( T * \alpha + \sum_{t} N_{td} \right) \right) \\
+    \\
+    \mathcal{L}(w,z) & = \mathcal{L}(w | z) + \mathcal{L}(z)\\
+
+    N_{td} =\text{number of tokens with topic t in document d}\\
+    N_{wt} =\text{number of tokens with topic t for word w}
+   * @return
+   */
   def logLikelihood(): Double = {
     val nw = nWords
     val nt = nTopics
@@ -314,7 +332,6 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   }
 
   def logPerformanceStatistics() = {
-    val broadcastTime = broadcastTimes.reduce(_ + _) / 1e9
     val resampleTime = resampleTimes.reduce(_ + _) / 1e9
     val updateCountsTime = updateCountsTimes.reduce(_ + _) / 1e9
     val globalCountsTime = globalCountsTimes.reduce(_ + _) / 1e9
@@ -329,7 +346,6 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     logInfo(s"Setup: $setupTime s")
     logInfo(s"Run: $runTime s")
     logInfo(s"Total: $totalTime s")
-    logInfo(s"Broadcast Time: $broadcastTime")
     logInfo(s"Resample Time: $resampleTime")
     logInfo(s"Update Counts Time: $updateCountsTime")
     logInfo(s"Global Counts Time: $globalCountsTime")

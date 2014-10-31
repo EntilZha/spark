@@ -66,15 +66,14 @@ object LDA {
   }
   def sampleToken(gen:java.util.Random,
                   triplet:EdgeTriplet[Factor, TopicId],
-                  totalHistBroadCast:Broadcast[LDA.Factor],
+                  totalHist:LDA.Factor,
                   nt:Int,
                   alpha:Double,
                   beta:Double,
                   nw:Long): Int = {
 
-    val wHist:Array[Count] = triplet.srcAttr
-    val dHist:Array[Count] = triplet.dstAttr
-    val totalHist = totalHistBroadCast.value
+    val wHist:Factor = triplet.srcAttr
+    val dHist:Factor = triplet.dstAttr
     val oldTopic = triplet.attr
     assert(wHist(oldTopic) > 0)
     assert(dHist(oldTopic) > 0)
@@ -97,14 +96,13 @@ object LDA {
     val u = gen.nextDouble() * conditionalSum
     assert(u < conditionalSum)
     // Draw the new topic from the multinomial
-    t = 0
-    var cumsum = conditional(t)
+    var newTopic = 0
+    var cumsum = conditional(newTopic)
     while (cumsum < u) {
-      t += 1
-      cumsum += conditional(t)
+      newTopic += 1
+      cumsum += conditional(newTopic)
     }
-    val newTopic = t
-    return newTopic
+    newTopic
   }
 }
 
@@ -225,7 +223,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       graph = graph.mapTriplets { (pid, iter) =>
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map { token =>
-          LDA.sampleToken(gen, token, totalHistbcast, nt, a, b, nw)
+          LDA.sampleToken(gen, token, totalHistbcast.value, nt, a, b, nw)
         }
       }
       if (logIter != 0) {
@@ -238,7 +236,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       val newCounts = graph.mapReduceTriplets[Factor](
         e => Iterator((e.srcId, makeFactor(nt, e.attr)), (e.dstId, makeFactor(nt, e.attr))),
         (a, b) => { addEq(a,b); a } )
-      graph = graph.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }//.cache
+      graph = graph.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
       if (logIter != 0) {
         graph.cache.triplets.count()
         updateCountsTimes += System.nanoTime() - tempTimer

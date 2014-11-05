@@ -1,17 +1,36 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.apache.spark.graphx.lib
 
 import org.apache.commons.math3.special.Gamma
 import org.apache.spark.{SparkContext, Logging}
-import org.apache.spark.broadcast._
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.PartitionStrategy.{CanonicalRandomVertexCut, EdgePartition1D, EdgePartition2D, RandomVertexCut}
 import org.apache.spark.graphx.util.TimeTracker
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.BoundedPriorityQueue
-import org.apache.log4j.{LogManager, Level, Logger}
-
+import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 
+/**
+ * LDA contains utility methods used in the LDA class. These are mostly
+ * methods which will be serialized during computation so cannot be methods.
+ */
 object LDA {
   type DocId = VertexId
   type WordId = VertexId
@@ -20,10 +39,16 @@ object LDA {
 
   type Factor = Array[Count]
 
-  class Posterior (docs: VertexRDD[Factor], words: VertexRDD[Factor])
+  class Posterior (docs:VertexRDD[Factor], words:VertexRDD[Factor])
 
-  // For memory efficiency/garbage collection, don't allocate a new Factor, return one of the originals
-  def addEq(a: Factor, b: Factor): Factor = {
+  /**
+   * Sums two factors together into a, then returns it. This increases memory efficiency
+   * and reduces garbage collection.
+   * @param a First factor
+   * @param b Second factor
+   * @return Sum of factors
+   */
+  def addEq(a:Factor, b:Factor):Factor = {
     assert(a.size == b.size)
     var i = 0
     while (i < a.size) {
@@ -33,25 +58,53 @@ object LDA {
     a
   }
 
-  // For memory efficiency/garbage collection, don't allocate a new Factor, return the original
-  def addEq(a: Factor, t: TopicId): Factor = { a(t) += 1; a }
+  /**
+   * Combines a topic into a factor
+   * @param a Factor to add to
+   * @param t topic to add
+   * @return Result of adding topic into factor.
+   */
+  def addEq(a:Factor, t:TopicId):Factor = { a(t) += 1; a }
 
+  /**
+   * Creates a factor with topic added to it.
+   * @param nTopics Number of topics
+   * @param topic Topic to start with
+   * @return New factor with topic added to it
+   */
   def makeFactor(nTopics: Int, topic: TopicId): Factor = {
     val f = new Factor(nTopics)
     f(topic) += 1
     f
   }
-  def extractVocab(tokens:RDD[String]): (Array[String], scala.collection.mutable.Map[String, WordId]) = {
+
+  /**
+   * Extracts the vocabulary from the RDD of tokens. Returns a Map from each word to its unique
+   * number key, and an array indexable by that number key to the word
+   * @param tokens RDD of tokens to create vocabulary from
+   * @return array and map for looking up words from keys and keys from words.
+   */
+  def extractVocab(tokens:RDD[String]): (Array[String], mutable.Map[String, WordId]) = {
     val vocab = tokens.distinct().collect()
-    var vocabLookup = scala.collection.mutable.Map[String, WordId]()
+    var vocabLookup = mutable.Map[String, WordId]()
     for (i <- 0 to vocab.length - 1) {
       vocabLookup += (vocab(i) -> i)
     }
     (vocab, vocabLookup)
   }
+
+  /**
+   * Extracts edges from an RDD of documents. Each document is a single line/string
+   * in the RDD
+   * @param lines RDD of documents
+   * @param vocab Vocabulary in the documents
+   * @param vocabLookup Vocabulary lookup in the documents
+   * @param delimiter Delimiter to split on
+   * @return RDD of edges between words and documents representing tokens.
+   */
   def edgesFromTextDocLines(lines:RDD[String],
                             vocab:Array[String],
-                            vocabLookup:scala.collection.mutable.Map[String, WordId],
+                            vocabLookup:mutable.Map[String, WordId],
                             delimiter:String=" "): RDD[(LDA.WordId, LDA.DocId)] = {
     val sc = lines.sparkContext
     val numDocs = lines.count()
@@ -64,6 +117,18 @@ object LDA {
     }
     edges
   }
+
+  /**
+   * Re-samples the given token/triplet to a new topic
+   * @param gen Random number generator
+   * @param triplet Token to re-sample
+   * @param totalHist Total histogram of topics
+   * @param nt Number of topics
+   * @param alpha Parameter for dirichlet prior on per document topic distributions
+   * @param beta Parameter for the dirichlet prior on per topic word distributions
+   * @param nw Number of words in corpus
+   * @return New topic for token/triplet
+   */
   def sampleToken(gen:java.util.Random,
                   triplet:EdgeTriplet[Factor, TopicId],
                   totalHist:LDA.Factor,
@@ -112,7 +177,9 @@ object LDA {
  * @param nTopics Number of topics
  * @param alpha Model parameter
  * @param beta Model parameter
- * @param logIter Interval for logging, if set to 0 only logs at model return
+ * @param loggingInterval Interval for logging
+ * @param loggingLikelihood If true, log the likelihood
+ * @param loggingTime if true, log the runtime of each component
  */
 class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           val nTopics: Int = 100,
@@ -152,11 +219,20 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       (a, b) => addEq(a,b) )
     // Update the graph with the factors
     gTmp.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
-    // Trigger computation of the topic counts
   }
 
+  /**
+   * Get the word vertices by filtering on non-negative vertices
+   * @return Word vertices
+   */
   def wordVertices: VertexRDD[LDA.Factor] = graph.vertices.filter{ case (vid, c) => vid >= 0 }
+
+  /**
+   * Get the document vertices by filtering on negative vertices
+   * @return Document vertices
+   */
   def docVertices: VertexRDD[LDA.Factor] = graph.vertices.filter{ case (vid, c) => vid < 0 }
+
   /**
    * The number of unique words in the corpus
    */
@@ -179,9 +255,24 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     .aggregate(new Factor(nTopics))(LDA.addEq(_, _), LDA.addEq(_, _))
   assert(totalHist.sum == nTokens)
 
+  /**
+   * List to track time spent doing Gibbs sampling
+   */
   val resampleTimes = new ListBuffer[Long]()
+
+  /**
+   * List to track time spent updating the counts on the graph
+   */
   val updateCountsTimes = new ListBuffer[Long]()
+
+  /**
+   * List to track time spent updating the global topic histogram
+   */
   val globalCountsTimes = new ListBuffer[Long]()
+
+  /**
+   * List to track negative log likelihood
+   */
   val likelihoods = new ListBuffer[Double]()
 
   /**
@@ -194,32 +285,32 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   timer.stop("setup")
 
   /**
-   * Run the gibbs sampler
-   * @param nIter
-   * @return
+   * Trains the model by iterating nIter times
+   * @param nIter Number of iterations to execute
    */
-  def iterate(nIter: Int = 1) {
+  def train(iterations:Int) {
     // Run the sampling
     timer.start("run")
     logInfo("Starting LDA Iterations...")
-    for (i <- 0 until nIter) {
-      logInfo(s"Iteration $i of $nIter...")
+    for (i <- 0 until iterations) {
+      logInfo(s"Iteration $i of $iterations...")
+
+      // Log the negative log likelihood
       if (loggingLikelihood && i % loggingInterval == 0) {
         val likelihood = logLikelihood()
         likelihoods += likelihood
       }
-      var tempTimer:Long = 0
       // Broadcast the topic histogram
       val totalHistbcast = sc.broadcast(totalHist)
 
-      // Shadowing because scala's closure capture is an abomination
+      // Shadowing because scala's closure capture would otherwise serialize the model object
       val a = alpha
       val b = beta
       val nt = nTopics
       val nw = nWords
 
-      // Resample all the tokens
-      tempTimer = System.nanoTime()
+      // Re-sample all the tokens
+      var tempTimer:Long = System.nanoTime()
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
       graph = graph.mapTriplets { (pid, iter) =>
@@ -255,6 +346,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
 
       internalIteration += 1
     }
+    // Log the final results of training
     val likelihood = logLikelihood()
     likelihoods += likelihood
     timer.stop("run")
@@ -262,11 +354,17 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     logPerformanceStatistics()
   }
 
-  def topWords(k: Int): Array[Array[(Count, WordId)]] = {
+  /**
+   * Creates an object holding the top counts. The first array is of size number
+   * of topics. It contains a list of k elements representing the top words for that topic
+   * @param k Number of top words to output
+   * @return object with top counts for each word.
+   */
+  def topWords(k:Int): Array[Array[(Count, WordId)]] = {
     val nt = nTopics
-    graph.vertices.filter {
+    graph.vertices.filter({
       case (vid, c) => vid >= 0
-    }.mapPartitions { items =>
+    }).mapPartitions({ items =>
       val queues = Array.fill(nt)(new BoundedPriorityQueue[(Count, WordId)](k))
       for ((wordId, factor) <- items) {
         var t = 0
@@ -277,16 +375,20 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         }
       }
       Iterator(queues)
-    }.reduce { (q1, q2) =>
-      q1.zip(q2).foreach { case (a,b) => a ++= b }
+    }).reduce({ (q1, q2) =>
+      q1.zip(q2).foreach({ case (a,b) => a ++= b })
       q1
-    }.map ( q => q.toArray )
-  } // end of TopWords
+    }).map(q => q.toArray)
+  }
 
-  def posterior: Posterior = {
+  /**
+   * Creates the posterior distribution for sampling from the vertices
+   * @return Posterior distribution
+   */
+  def posterior:Posterior = {
     graph.cache()
-    val words = graph.vertices.filter { case (vid, _) => vid >= 0 }
-    val docs =  graph.vertices.filter { case (vid,_) => vid < 0 }
+    val words = graph.vertices.filter({ case (vid, _) => vid >= 0 })
+    val docs =  graph.vertices.filter({ case (vid,_) => vid < 0 })
     new LDA.Posterior(words, docs)
   }
 
@@ -307,7 +409,6 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
 
     N_{td} =\text{number of tokens with topic t in document d}\\
     N_{wt} =\text{number of tokens with topic t for word w}
-   * @return
    */
   def logLikelihood(): Double = {
     val nw = nWords
@@ -320,7 +421,8 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     val logPWGivenZ =
       nTopics * (Gamma.logGamma(nw * b) - nw * logBeta) -
       totalHist.map(v => Gamma.logGamma(v + nw * b)).reduce(_ + _) +
-      wordVertices.map({ case (id, f) => f.map(v => Gamma.logGamma(v + b)).reduce(_ + _)}).reduce(_ + _)
+      wordVertices.map({ case (id, f) => f.map(v => Gamma.logGamma(v + b)).reduce(_ + _)})
+                  .reduce(_ + _)
     val logPZ =
       nd * (Gamma.logGamma(nt * a) - nt * logAlpha) +
       docVertices.map({ case (id, f) =>
@@ -329,6 +431,9 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     logPWGivenZ + logPZ
   }
 
+  /**
+   * Logs the final machine performance and ML performance to INFO
+   */
   def logPerformanceStatistics() = {
     val resampleTime = if (loggingTime) resampleTimes.reduce(_ + _) / 1e9 else 0
     val updateCountsTime = if (loggingTime) updateCountsTimes.reduce(_ + _) / 1e9 else 0
@@ -366,114 +471,4 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     timer.getSeconds("setup") + timer.getSeconds("run")
   }
 
-} // end of TopicModeling
-
-
-
-object TopicModeling {
-  def main(args: Array[String]) {
-    val host = args(0)
-    val options =  args.drop(1).map { arg =>
-      arg.dropWhile(_ == '-').split('=') match {
-        case Array(opt, v) => (opt -> v)
-        case _ => throw new IllegalArgumentException("Invalid argument: " + arg)
-      }
-    }
-
-    var tokensFile = ""
-    var dictionaryFile = ""
-    var numVPart = 4
-    var numEPart = 4
-    var partitionStrategy: Option[PartitionStrategy] = None
-    var nIter = 50
-    var nTopics = 10
-    var alpha = 0.1
-    var beta  = 0.1
-
-    def pickPartitioner(v: String): PartitionStrategy = v match {
-      case "RandomVertexCut" => RandomVertexCut
-      case "EdgePartition1D" => EdgePartition1D
-      case "EdgePartition2D" => EdgePartition2D
-      case "CanonicalRandomVertexCut" => CanonicalRandomVertexCut
-      case _ => throw new IllegalArgumentException("Invalid Partition Strategy: " + v)
-    }
-
-    options.foreach{
-      case ("tokens", v) => tokensFile = v
-      case ("dictionary", v) => dictionaryFile = v
-      case ("numVPart", v) => numVPart = v.toInt
-      case ("numEPart", v) => numEPart = v.toInt
-      case ("partStrategy", v) => partitionStrategy = Some(pickPartitioner(v))
-      case ("niter", v) => nIter = v.toInt
-      case ("ntopics", v) => nTopics = v.toInt
-      case ("alpha", v) => alpha = v.toDouble
-      case ("beta", v) => beta = v.toDouble
-      case (opt, _) => throw new IllegalArgumentException("Invalid option: " + opt)
-    }
-
-    println("Tokens:     " + tokensFile)
-    println("Dictionary: " + dictionaryFile)
-
-    // def setLogLevels(level: org.apache.log4j.Level, loggers: TraversableOnce[String]) = {
-    //   loggers.map{
-    //     loggerName =>
-    //       val logger = org.apache.log4j.Logger.getLogger(loggerName)
-    //     val prevLevel = logger.getLevel()
-    //     logger.setLevel(level)
-    //     loggerName -> prevLevel
-    //   }.toMap
-    // }
-    // setLogLevels(org.apache.log4j.Level.DEBUG, Seq("org.apache.spark"))
-
-
-    val serializer = "org.apache.spark.serializer.KryoSerializer"
-    System.setProperty("spark.serializer", serializer)
-    //System.setProperty("spark.shuffle.compress", "false")
-    System.setProperty("spark.kryo.registrator", "org.apache.spark.graph.GraphKryoRegistrator")
-    val sc = new SparkContext(host, "LDA(" + tokensFile + ")")
-
-    val rawTokens: RDD[(LDA.WordId, LDA.DocId)] =
-      sc.textFile(tokensFile, numEPart).flatMap { line =>
-      val lineArray = line.split("\\s+")
-      if(lineArray.length != 3) {
-        println("Invalid line: " + line)
-        assert(false)
-      }
-      val termId = lineArray(0).trim.toLong
-      val docId = lineArray(1).trim.toLong
-      assert(termId >= 0)
-      assert(docId >= 0)
-      val count = lineArray(2).trim.toInt
-      assert(count > 0)
-      //Iterator((termId, docId))
-      Iterator.fill(count)((termId, docId))
-    }
-
-    val dictionary =
-      if (!dictionaryFile.isEmpty) {
-        scala.io.Source.fromFile(dictionaryFile).getLines.toArray
-      } else {
-        Array.empty
-      }
-
-    val model = new LDA(rawTokens, nTopics, alpha, beta)
-
-    for(iter <- 0 until nIter) {
-      model.iterate(1)
-      val topWords = model.topWords(5)
-      for (queue <- topWords) {
-        println("word list: ")
-        if (!dictionary.isEmpty) {
-          queue.foreach(t => println("\t(" + t._1 + ", " + dictionary(t._2.toInt - 1) + ")"))
-        } else {
-          queue.foreach(t => println("\t" + t.toString))
-        }
-      }
-      println("Sampled iteration: " + iter.toString)
-    }
-
-    sc.stop()
-
-  }
-} // end of TopicModeling object
-
+}

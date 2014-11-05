@@ -17,21 +17,20 @@
 
 package org.apache.spark.graphx.lib
 
-import org.apache.spark.graphx.lib.LDA
-import org.apache.spark.graphx.lib.LDA.{TopicId, DocId, WordId, Count, Factor}
-import org.scalatest.{FunSuite, Matchers}
-
-import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.graphx._
+import org.apache.spark.graphx.lib.LDA.{DocId, Factor, TopicId, WordId}
 import org.apache.spark.rdd._
+import org.scalatest.{FunSuite, Matchers}
+
+import scala.collection.mutable
 
 class TopicModelingSuite extends FunSuite with LocalSparkContext with Matchers {
   test("Test edge generation") {
     withSpark { sc =>
       val lines = sc.textFile("data/lda-mini-test.txt")
       val tokens = lines.flatMap(line => line.split(" "))
-      val (vocab:Array[String], vocabLookup:scala.collection.mutable.Map[String, WordId]) = LDA.extractVocab(tokens)
+      val (vocab:Array[String], vocabLookup:mutable.Map[String, WordId]) = LDA.extractVocab(tokens)
       // Extract the edges then reverse the wordId and docId to let us use groupByKey
       val edges:RDD[(LDA.WordId, LDA.DocId)] = LDA.edgesFromTextDocLines(lines, vocab, vocabLookup)
         .map{ case (wordId:WordId, docId:DocId) =>
@@ -56,7 +55,7 @@ class TopicModelingSuite extends FunSuite with LocalSparkContext with Matchers {
       val (vocab, vocabLookup) = LDA.extractVocab(tokens)
       val edges = LDA.edgesFromTextDocLines(lines, vocab, vocabLookup)
       val model = new LDA(edges, nTopics=2)
-      model.iterate(20)
+      model.train(20)
       val topWords = model.topWords(2)
       val t1w1 = vocab(topWords(0)(0)._2.toInt)
       val t1w2 = vocab(topWords(0)(1)._2.toInt)

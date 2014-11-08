@@ -18,6 +18,7 @@
 package org.apache.spark.graphx.lib
 
 import org.apache.commons.math3.special.Gamma
+import org.apache.spark.SparkContext._
 import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.PartitionStrategy.{CanonicalRandomVertexCut, EdgePartition1D, EdgePartition2D, RandomVertexCut}
@@ -313,12 +314,12 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       var tempTimer:Long = System.nanoTime()
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
-      graph = graph.mapTriplets { (pid, iter) =>
+      graph = graph.mapTriplets({ (pid, iter) =>
         val gen = new java.util.Random(parts * interIter + pid)
-        iter.map { token =>
+        iter.map({ token =>
           LDA.sampleToken(gen, token, totalHistbcast.value, nt, a, b, nw)
-        }
-      }
+        })
+      })
       if (loggingTime && i % loggingInterval == 0) {
         graph.cache.triplets.count()
         resampleTimes += System.nanoTime() - tempTimer
@@ -326,9 +327,13 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
 
       // Update the counts
       tempTimer = System.nanoTime()
-      val newCounts = graph.mapReduceTriplets[Factor](
-        e => Iterator((e.srcId, makeFactor(nt, e.attr)), (e.dstId, makeFactor(nt, e.attr))),
-        (a, b) => { addEq(a,b); a } )
+
+      val newCounts = graph.triplets
+                         .flatMap(e => {Iterator((e.srcId, e.attr), (e.dstId, e.attr))})
+                         .aggregateByKey(new Factor(nt))(LDA.addEq(_, _), LDA.addEq(_, _))
+      //val newCounts = graph.mapReduceTriplets[Factor](
+      //  e => Iterator((e.srcId, makeFactor(nt, e.attr)), (e.dstId, makeFactor(nt, e.attr))),
+      //  (a, b) => { addEq(a,b); a } )
       graph = graph.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
       if (loggingTime && i % loggingInterval == 0) {
         graph.cache.triplets.count()

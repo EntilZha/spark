@@ -35,6 +35,7 @@ private[spark] object SQLConf {
   val PARQUET_BINARY_AS_STRING = "spark.sql.parquet.binaryAsString"
   val PARQUET_CACHE_METADATA = "spark.sql.parquet.cacheMetadata"
   val PARQUET_COMPRESSION = "spark.sql.parquet.compression.codec"
+  val COLUMN_NAME_OF_CORRUPT_RECORD = "spark.sql.columnNameOfCorruptRecord"
 
   // This is only used for the thriftserver
   val THRIFTSERVER_POOL = "spark.sql.thriftserver.scheduler.pool"
@@ -78,13 +79,13 @@ private[sql] trait SQLConf {
   private[spark] def dialect: String = getConf(DIALECT, "sql")
 
   /** When true tables cached using the in-memory columnar caching will be compressed. */
-  private[spark] def useCompression: Boolean = getConf(COMPRESS_CACHED, "false").toBoolean
+  private[spark] def useCompression: Boolean = getConf(COMPRESS_CACHED, "true").toBoolean
 
   /** The compression codec for writing to a Parquetfile */
-  private[spark] def parquetCompressionCodec: String = getConf(PARQUET_COMPRESSION, "snappy")
+  private[spark] def parquetCompressionCodec: String = getConf(PARQUET_COMPRESSION, "gzip")
 
   /** The number of rows that will be  */
-  private[spark] def columnBatchSize: Int = getConf(COLUMN_BATCH_SIZE, "1000").toInt
+  private[spark] def columnBatchSize: Int = getConf(COLUMN_BATCH_SIZE, "10000").toInt
 
   /** Number of partitions to use for shuffle operators. */
   private[spark] def numShufflePartitions: Int = getConf(SHUFFLE_PARTITIONS, "200").toInt
@@ -105,10 +106,10 @@ private[sql] trait SQLConf {
    * a broadcast value during the physical executions of join operations.  Setting this to -1
    * effectively disables auto conversion.
    *
-   * Hive setting: hive.auto.convert.join.noconditionaltask.size, whose default value is also 10000.
+   * Hive setting: hive.auto.convert.join.noconditionaltask.size, whose default value is 10000.
    */
   private[spark] def autoBroadcastJoinThreshold: Int =
-    getConf(AUTO_BROADCASTJOIN_THRESHOLD, "10000").toInt
+    getConf(AUTO_BROADCASTJOIN_THRESHOLD, (10 * 1024 * 1024).toString).toInt
 
   /**
    * The default size in bytes to assign to a logical operator's estimation statistics.  By default,
@@ -130,6 +131,9 @@ private[sql] trait SQLConf {
    */
   private[spark] def inMemoryPartitionPruning: Boolean =
     getConf(IN_MEMORY_PARTITION_PRUNING, "false").toBoolean
+
+  private[spark] def columnNameOfCorruptRecord: String =
+    getConf(COLUMN_NAME_OF_CORRUPT_RECORD, "_corrupt_record")
 
   /** ********************** SQLConf functionality methods ************ */
 

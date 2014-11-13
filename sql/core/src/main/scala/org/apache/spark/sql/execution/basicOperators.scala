@@ -143,7 +143,7 @@ case class Limit(limit: Int, child: SparkPlan)
       partsScanned += numPartsToTry
     }
 
-    buf.toArray
+    buf.toArray.map(ScalaReflection.convertRowToScala(_, this.schema))
   }
 
   override def execute() = {
@@ -176,10 +176,11 @@ case class TakeOrdered(limit: Int, sortOrder: Seq[SortOrder], child: SparkPlan) 
   override def output = child.output
   override def outputPartitioning = SinglePartition
 
-  val ordering = new RowOrdering(sortOrder, child.output)
+  val ord = new RowOrdering(sortOrder, child.output)
 
   // TODO: Is this copying for no reason?
-  override def executeCollect() = child.execute().map(_.copy()).takeOrdered(limit)(ordering)
+  override def executeCollect() = child.execute().map(_.copy()).takeOrdered(limit)(ord)
+    .map(ScalaReflection.convertRowToScala(_, this.schema))
 
   // TODO: Terminal split should be implemented differently from non-terminal split.
   // TODO: Pick num splits based on |limit|.
@@ -208,45 +209,6 @@ case class Sort(
   }
 
   override def output = child.output
-}
-
-/**
- * :: DeveloperApi ::
- */
-@DeveloperApi
-object ExistingRdd {
-  def productToRowRdd[A <: Product](data: RDD[A]): RDD[Row] = {
-    data.mapPartitions { iterator =>
-      if (iterator.isEmpty) {
-        Iterator.empty
-      } else {
-        val bufferedIterator = iterator.buffered
-        val mutableRow = new GenericMutableRow(bufferedIterator.head.productArity)
-
-        bufferedIterator.map { r =>
-          var i = 0
-          while (i < mutableRow.length) {
-            mutableRow(i) = ScalaReflection.convertToCatalyst(r.productElement(i))
-            i += 1
-          }
-
-          mutableRow
-        }
-      }
-    }
-  }
-
-  def fromProductRdd[A <: Product : TypeTag](productRdd: RDD[A]) = {
-    ExistingRdd(ScalaReflection.attributesFor[A], productToRowRdd(productRdd))
-  }
-}
-
-/**
- * :: DeveloperApi ::
- */
-@DeveloperApi
-case class ExistingRdd(output: Seq[Attribute], rdd: RDD[Row]) extends LeafNode {
-  override def execute() = rdd
 }
 
 /**

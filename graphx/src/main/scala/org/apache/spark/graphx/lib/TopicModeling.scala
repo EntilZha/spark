@@ -136,7 +136,7 @@ object LDA {
                   nt:Int,
                   alpha:Double,
                   beta:Double,
-                  nw:Long): Int = {
+                  nw:Long): TopicId = {
 
     val wHist:Factor = triplet.srcAttr
     val dHist:Factor = triplet.dstAttr
@@ -199,7 +199,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   /**
    * The bipartite terms by document graph.
    */
-  private var graph: Graph[Factor, TopicId] = {
+  private var graph:Graph[Factor, TopicId] = {
     // To setup a bipartite graph it is necessary to ensure that the document and
     // word ids are in a different namespace
     val renumbered = tokens.map { case (wordId, docId) =>
@@ -314,12 +314,12 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       var tempTimer:Long = System.nanoTime()
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
-      graph = graph.mapTriplets({ (pid, iter) =>
+      graph = graph.mapTriplets({(pid:PartitionID, iter:Iterator[EdgeTriplet[LDA.Factor, LDA.TopicId]]) =>
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
           LDA.sampleToken(gen, token, totalHistbcast.value, nt, a, b, nw)
         })
-      })
+      }, TripletFields.All)
       if (loggingTime && i % loggingInterval == 0) {
         graph.cache.triplets.count()
         resampleTimes += System.nanoTime() - tempTimer

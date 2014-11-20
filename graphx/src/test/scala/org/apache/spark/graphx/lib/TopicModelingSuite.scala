@@ -129,4 +129,26 @@ class TopicModelingSuite extends FunSuite with LocalSparkContext with Matchers {
     result should be (fExpect)
     f1 should be (fExpect)
   }
+//  test("Benchmark LDA.sampleToken") {
+//    val nTopics = 100
+//    val rand = new java.util.Random(0)
+//    val pos = math.abs(rand.nextInt()) % 100
+//    val wHist = new Factor(nTopics)
+//    wHist(pos) = 1
+//    val dHist = new Factor(nTopics)
+//    dHist(pos) = 1
+//    val triplet = new EdgeTriplet[Factor, TopicId]()
+//    triplet.srcAttr = wHist
+//    triplet.dstAttr = dHist
+//    triplet.attr = pos
+//    val nw = 705098
+//    val tokens = 20199291
+//    val currentTime = System.nanoTime()
+//    for (i <- 0 until tokens) {
+//      LDA.sampleToken(rand, triplet, dHist, nTopics, .1, .1, nw)
+//    }
+//    val finishTime = System.nanoTime()
+//    val runTime = finishTime - currentTime
+//    println("Sample Time: " + runTime.toString)
+//  }
 }

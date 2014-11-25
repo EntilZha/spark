@@ -174,7 +174,7 @@ object LDA {
 
 /**
  * LDA contains the model for topic modeling using Latent Dirichlet Allocation
- * @param tokens RDD of edges
+ * @param tokens RDD of edges, transient to insure it doesn't get sent to workers
  * @param nTopics Number of topics
  * @param alpha Model parameter
  * @param beta Model parameter

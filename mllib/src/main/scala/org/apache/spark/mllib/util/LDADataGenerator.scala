@@ -85,4 +85,26 @@ object LDADataGenerator {
     })
     return data
   }
+
+  def main(args: Array[String]): Unit = {
+    if (args.length < 8) {
+      println("Usage: LDADataGenerator " +
+        "<master> <output_dir> <alpha> <beta> <nTopics> <nDocs> <nWords> <nTokensPerDoc>"
+      )
+      System.exit(1)
+    }
+
+    val sparkMaster:String = args(0)
+    val outputPath:String = args(1)
+    val alpha:Double = args(2).toDouble
+    val beta:Double = args(3).toDouble
+    val nTopics:Int = args(4).toInt
+    val nDocs:Int = args(5).toInt
+    val nWords:Int = args(6).toInt
+    val nTokensPerDoc:Int = args(7).toInt
+    val sc = new SparkContext(sparkMaster, "LDADataGenerator")
+    val data = generateCorpus(sc, alpha, beta, nTopics, nDocs, nWords, nTokensPerDoc)
+    data.saveAsTextFile(outputPath)
+    sc.stop()
+  }
 }

@@ -17,6 +17,7 @@
 
 package org.apache.spark.graphx.lib
 
+import breeze.linalg.DenseVector
 import org.apache.commons.math3.special.Gamma
 import org.apache.spark.SparkContext._
 import org.apache.spark.{SparkContext, Logging}
@@ -136,7 +137,7 @@ object LDA {
                   nt:Int,
                   alpha:Double,
                   beta:Double,
-                  nw:Long): TopicId = {
+                  nw:Long):TopicId = {
 
     val wHist:Factor = triplet.srcAttr
     val dHist:Factor = triplet.dstAttr
@@ -169,6 +170,28 @@ object LDA {
       cumsum += conditional(newTopic)
     }
     newTopic
+  }
+  def fastSampleToken(gen:java.util.Random,
+                      triplet:EdgeTriplet[Factor, TopicId],
+                      totalHist:LDA.Factor,
+                      nt:Int,
+                      alpha:Double,
+                      beta:Double,
+                      nw:Long):TopicId = {
+    val preA = triplet.dstAttr
+    val preB = triplet.srcAttr
+    val preC = totalHist
+    val topic = triplet.attr
+    val sumP = DenseVector.zeros[Double](nt)
+    val u = gen.nextDouble()
+    for (k <- 1 until nt) {
+      val offset = if (k == topic) 1 else 0
+      val a = preA(k) - offset + alpha
+      val b = preB(k) - offset + beta
+      val c = 1 / (preC(k) - offset + beta * nw)
+      sumP(k) = sumP(k - 1) + a * b * c
+    }
+    return 0
   }
 }
 

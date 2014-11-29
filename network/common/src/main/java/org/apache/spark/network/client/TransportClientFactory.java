@@ -91,10 +91,6 @@ public class TransportClientFactory implements Closeable {
    * This blocks until a connection is successfully established and fully bootstrapped.
    *
    * Concurrency: This method is safe to call from multiple threads.
-   * @param remoteHost TODO
-   * @param remotePort TODO
-   * @return TODO
-   * @throws java.io.IOException TODO
    */
   public TransportClient createClient(String remoteHost, int remotePort) throws IOException {
     // Get connection from the connection pool first.

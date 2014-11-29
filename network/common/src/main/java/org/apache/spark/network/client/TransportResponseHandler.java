@@ -160,9 +160,7 @@ public class TransportResponseHandler extends MessageHandler<ResponseMessage> {
     }
   }
 
-  /** Returns total number of outstanding requests (fetch requests + rpcs)
-   * @return TODO
-   * */
+  /** Returns total number of outstanding requests (fetch requests + rpcs) */
   @VisibleForTesting
   public int numOutstandingRequests() {
     return outstandingFetches.size() + outstandingRpcs.size();

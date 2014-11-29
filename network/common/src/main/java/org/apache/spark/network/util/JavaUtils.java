@@ -41,9 +41,7 @@ import org.slf4j.LoggerFactory;
 public class JavaUtils {
   private static final Logger logger = LoggerFactory.getLogger(JavaUtils.class);
 
-  /** Closes the given object, ignoring IOExceptions.
-   * @param closeable TODO
-   * */
+  /** Closes the given object, ignoring IOExceptions. */
   public static void closeQuietly(Closeable closeable) {
     try {
       if (closeable != null) {
@@ -54,10 +52,7 @@ public class JavaUtils {
     }
   }
 
-  /** Returns a hash consistent with Spark's Utils.nonNegativeHash().
-   * @param obj TODO
-   * @return TODO
-   */
+  /** Returns a hash consistent with Spark's Utils.nonNegativeHash(). */
   public static int nonNegativeHash(Object obj) {
     if (obj == null) { return 0; }
     int hash = obj.hashCode();
@@ -67,8 +62,6 @@ public class JavaUtils {
   /**
    * Convert the given string to a byte buffer. The resulting buffer can be
    * converted back to the same string through {@link #bytesToString(ByteBuffer)}.
-   * @param s TODO
-   * @return TODO
    */
   public static ByteBuffer stringToBytes(String s) {
     return Unpooled.wrappedBuffer(s.getBytes(Charsets.UTF_8)).nioBuffer();
@@ -77,8 +70,6 @@ public class JavaUtils {
   /**
    * Convert the given byte buffer to a string. The resulting string can be
    * converted back to the same byte buffer through {@link #stringToBytes(String)}.
-   * @param b TODO
-   * @return TODO
    */
   public static String bytesToString(ByteBuffer b) {
     return Unpooled.wrappedBuffer(b).toString(Charsets.UTF_8);
@@ -88,7 +79,6 @@ public class JavaUtils {
    * Delete a file or directory and its contents recursively.
    * Don't follow directories if they are symlinks.
    * Throws an exception if deletion is unsuccessful.
-   * @param file TODO
    */
   public static void deleteRecursively(File file) throws IOException {
     if (file == null) { return; }

@@ -50,10 +50,7 @@ public class TransportServer implements Closeable {
   private ChannelFuture channelFuture;
   private int port = -1;
 
-  /** Creates a TransportServer that binds to the given port, or to any available if 0.
-   * @param context TODO
-   * @param portToBind TODO
-   * */
+  /** Creates a TransportServer that binds to the given port, or to any available if 0. */
   public TransportServer(TransportContext context, int portToBind) {
     this.context = context;
     this.conf = context.getConf();

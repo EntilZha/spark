@@ -21,9 +21,7 @@ import io.netty.buffer.ByteBuf;
 
 /** An on-the-wire transmittable message. */
 public interface Message extends Encodable {
-  /** Used to identify this request type.
-   * @return TODO
-   * */
+  /** Used to identify this request type. */
   Type type();
 
   /** Preceding every serialized Message is its type, which allows us to deserialize it. */

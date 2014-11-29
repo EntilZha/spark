@@ -27,8 +27,6 @@ package org.apache.spark.network.client;
  * the JVM itself.
  */
 public interface TransportClientBootstrap {
-  /** Performs the bootstrapping operation, throwing an exception on failure.
-   * @param client TODO
-   * */
+  /** Performs the bootstrapping operation, throwing an exception on failure. */
   public void doBootstrap(TransportClient client) throws RuntimeException;
 }

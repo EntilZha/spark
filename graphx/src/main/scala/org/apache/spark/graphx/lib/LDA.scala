@@ -17,7 +17,7 @@
 
 package org.apache.spark.graphx.lib
 
-import breeze.linalg.{sum, DenseVector}
+import breeze.linalg.{DenseVector}
 import org.apache.commons.math3.special.Gamma
 import org.apache.spark.SparkContext._
 import org.apache.spark.{SparkContext, Logging}
@@ -38,7 +38,7 @@ object LDA {
   type WordId = VertexId
   type TopicId = Int
 
-  class Posterior (docs:VertexRDD[DenseVector[Int]], words:VertexRDD[DenseVector[Int]])
+  class Posterior (docs:VertexRDD[Array[Int]], words:VertexRDD[Array[Int]])
 
   /**
    * Sums two factors together into a, then returns it. This increases memory efficiency
@@ -47,7 +47,7 @@ object LDA {
    * @param b Second factor
    * @return Sum of factors
    */
-  def addEq(a:DenseVector[Int], b:DenseVector[Int]):DenseVector[Int] = {
+  def addEq(a:Array[Int], b:Array[Int]):Array[Int] = {
     assert(a.size == b.size)
     var i = 0
     while (i < a.size) {
@@ -63,7 +63,7 @@ object LDA {
    * @param t topic to add
    * @return Result of adding topic into factor.
    */
-  def addEq(a:DenseVector[Int], t:TopicId):DenseVector[Int] = { a(t) += 1; a }
+  def addEq(a:Array[Int], t:TopicId):Array[Int] = { a(t) += 1; a }
 
   /**
    * Creates a factor with topic added to it.
@@ -71,8 +71,8 @@ object LDA {
    * @param topic Topic to start with
    * @return New factor with topic added to it
    */
-  def makeFactor(nTopics: Int, topic: TopicId):DenseVector[Int] = {
-    val f = DenseVector.zeros[Int](nTopics)
+  def makeFactor(nTopics: Int, topic: TopicId):Array[Int] = {
+    val f = new Array[Int](nTopics)
     f(topic) += 1
     f
   }
@@ -104,7 +104,7 @@ object LDA {
   def edgesFromTextDocLines(lines:RDD[String],
                             vocab:Array[String],
                             vocabLookup:mutable.Map[String, WordId],
-                            delimiter:String=" "): RDD[(LDA.WordId, LDA.DocId)] = {
+                            delimiter:String=" "):RDD[(LDA.WordId, LDA.DocId)] = {
     val sc = lines.sparkContext
     val numDocs = lines.count()
     val docIds:RDD[DocId] = sc.parallelize((0L until numDocs).toArray)
@@ -129,15 +129,15 @@ object LDA {
    * @return New topic for token/triplet
    */
   def sampleToken(gen:java.util.Random,
-                  triplet:EdgeTriplet[DenseVector[Int], TopicId],
-                  totalHist:DenseVector[Int],
+                  triplet:EdgeTriplet[Array[Int], TopicId],
+                  totalHist:Array[Int],
                   nt:Int,
                   alpha:Double,
                   beta:Double,
                   nw:Long):TopicId = {
 
-    val wHist:DenseVector[Int] = triplet.srcAttr
-    val dHist:DenseVector[Int] = triplet.dstAttr
+    val wHist = triplet.srcAttr
+    val dHist = triplet.dstAttr
     val oldTopic = triplet.attr
     assert(wHist(oldTopic) > 0)
     assert(dHist(oldTopic) > 0)
@@ -169,36 +169,71 @@ object LDA {
     newTopic
   }
   def fastSampleToken(gen:java.util.Random,
-                      triplet:EdgeTriplet[DenseVector[Int], TopicId],
-                      totalHist:DenseVector[Int],
+                      triplet:EdgeTriplet[Array[Int], TopicId],
+                      totalHist:Array[Int],
                       nt:Int,
                       alpha:Double,
                       beta:Double,
                       nw:Long):TopicId = {
-    val preA = triplet.dstAttr
-    val preB = triplet.srcAttr
-    val preC = totalHist
     val topic = triplet.attr
-    preA(topic) -= 1
-    preB(topic) -= 1
-    preC(topic) -= 1
-    preA :+= alpha
-    val sumP = DenseVector.zeros[Double](nt)
-    val u = gen.nextDouble()
-    val zBounds = DenseVector.zeros[Double](nt)
-    var aSquareSum:Int = sum(preA * preA)
-    var bSquareSum:Int = sum(preB * preB)
-    var cMin = 0
-    for (k <- 1 until nt) {
-      val a = preA(k) + alpha
-      val b = preB(k) + beta
-      val c = 1 / (preC(k) + beta * nw)
-      sumP(k) = sumP(k - 1) + a * b * c
-      aSquareSum -= preA(k) * preA(k)
-      bSquareSum -= preB(k) * preB(k)
-      zBounds(k) = sumP(k)
+    triplet.dstAttr(topic) -= 1
+    triplet.srcAttr(topic) -= 1
+    totalHist(topic) -= 1
+    val aCounts = triplet.dstAttr
+    val bCounts = triplet.srcAttr
+    val cCounts = new DenseVector(totalHist)
+    val sortedCCountsIndices = breeze.linalg.argsort(cCounts)
+    var sortedCCountsPosition = 0
+    var aSquareSum:Double = 0
+    var bSquareSum:Double = 0
+    var cArgMin:Int = sortedCCountsIndices(sortedCCountsPosition)
+    var cMin:Int = cCounts(cArgMin)
+    for (i <- 0 until nt) {
+      aSquareSum += math.pow(aCounts(i) + alpha, 2)
+      bSquareSum += math.pow(bCounts(i) + alpha, 2)
     }
-    return 0
+    val zBound = new Array[Double](nt)
+    val sumP = new Array[Double](nt)
+    var u = gen.nextDouble()
+    for (k <- 0 until nt) {
+      val a = aCounts(k) + alpha
+      val b = bCounts(k) + beta
+      val c = 1 / (cCounts(k) + beta * nw)
+      val priorSumP = if (k == 0) 0 else sumP(k - 1)
+      sumP(k) = priorSumP + a * b * c
+      val aSubtractTerm = math.pow(a, 2)
+      val bSubtractTerm = math.pow(b, 2)
+      aSquareSum = if (aSquareSum - aSubtractTerm > 0) aSquareSum - aSubtractTerm else 0
+      bSquareSum = if (bSquareSum - bSubtractTerm > 0) bSquareSum - bSubtractTerm else 0
+      if (cArgMin <= k) {
+        var continue = true
+        while (sortedCCountsPosition < nt && continue) {
+          if (sortedCCountsIndices(sortedCCountsPosition) > k) {
+            cArgMin = sortedCCountsIndices(sortedCCountsPosition)
+            cMin = cCounts(cArgMin)
+            continue = false
+          }
+          sortedCCountsPosition += 1
+        }
+      }
+      val aNorm = math.sqrt(aSquareSum)
+      val bNorm = math.sqrt(bSquareSum)
+      val cNorm = 1 / (cMin + nw * beta)
+      zBound(k) = sumP(k) + aNorm * bNorm * cNorm
+      if (u * zBound(k) <= sumP(k)) {
+        if (k == 0 || u * zBound(k) > priorSumP) {
+          return k
+        } else {
+          u = (u * zBound(k - 1) - priorSumP) * zBound(k) / (zBound(k - 1) - zBound(k))
+          for (t <- 0 until k) {
+            if (sumP(t) >= u) {
+              return t
+            }
+          }
+        }
+      }
+    }
+    throw new Exception("fast sample token failed")
   }
 }
 
@@ -206,8 +241,8 @@ object LDA {
  * LDA contains the model for topic modeling using Latent Dirichlet Allocation
  * @param tokens RDD of edges, transient to insure it doesn't get sent to workers
  * @param nTopics Number of topics
- * @param alpha Model parameter
- * @param beta Model parameter
+ * @param alpha Model parameter, governs sparsity in document-topic mixture
+ * @param beta Model parameter, governs sparsity in word-topic mixture
  * @param loggingInterval Interval for logging
  * @param loggingLikelihood If true, log the likelihood
  * @param loggingTime if true, log the runtime of each component
@@ -229,7 +264,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   /**
    * The bipartite terms by document graph.
    */
-  private var graph:Graph[DenseVector[Int], TopicId] = {
+  private var graph:Graph[Array[Int], TopicId] = {
     // To setup a bipartite graph it is necessary to ensure that the document and
     // word ids are in a different namespace
     val renumbered = tokens.map { case (wordId, docId) =>
@@ -245,7 +280,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         iter.map(e => gen.nextInt(nT))
       }
     // Compute the topic histograms (factors) for each word and document
-    val newCounts = gTmp.mapReduceTriplets[DenseVector[Int]](
+    val newCounts = gTmp.mapReduceTriplets[Array[Int]](
       e => Iterator((e.srcId, makeFactor(nT, e.attr)), (e.dstId, makeFactor(nT, e.attr))),
       (a, b) => addEq(a,b) )
     // Update the graph with the factors
@@ -256,13 +291,13 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    * Get the word vertices by filtering on non-negative vertices
    * @return Word vertices
    */
-  def wordVertices: VertexRDD[DenseVector[Int]] = graph.vertices.filter{ case (vid, c) => vid >= 0 }
+  def wordVertices: VertexRDD[Array[Int]] = graph.vertices.filter{ case (vid, c) => vid >= 0 }
 
   /**
    * Get the document vertices by filtering on negative vertices
    * @return Document vertices
    */
-  def docVertices: VertexRDD[DenseVector[Int]] = graph.vertices.filter{ case (vid, c) => vid < 0 }
+  def docVertices: VertexRDD[Array[Int]] = graph.vertices.filter{ case (vid, c) => vid < 0 }
 
   /**
    * The number of unique words in the corpus
@@ -283,7 +318,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    * The total counts for each topic
    */
   var totalHist = graph.edges.map(e => e.attr)
-    .aggregate(DenseVector.zeros[Int](nTopics))(LDA.addEq(_, _), LDA.addEq(_, _))
+    .aggregate(new Array[Int](nTopics))(LDA.addEq(_, _), LDA.addEq(_, _))
 
   /**
    * List to track time spent doing Gibbs sampling
@@ -343,10 +378,10 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       var tempTimer:Long = System.nanoTime()
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
-      graph = graph.mapTriplets({(pid:PartitionID, iter:Iterator[EdgeTriplet[DenseVector[Int], LDA.TopicId]]) =>
+      graph = graph.mapTriplets({(pid:PartitionID, iter:Iterator[EdgeTriplet[Array[Int], LDA.TopicId]]) =>
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
-          LDA.sampleToken(gen, token, totalHistbcast.value, nt, a, b, nw)
+          LDA.fastSampleToken(gen, token, totalHistbcast.value, nt, a, b, nw)
         })
       }, TripletFields.All)
       if (loggingTime && i % loggingInterval == 0) {
@@ -359,7 +394,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
 
       val newCounts = graph.triplets
                          .flatMap(e => {Iterator((e.srcId, e.attr), (e.dstId, e.attr))})
-                         .aggregateByKey(DenseVector.zeros[Int](nt))(LDA.addEq(_, _), LDA.addEq(_, _))
+                         .aggregateByKey(new Array[Int](nt))(LDA.addEq(_, _), LDA.addEq(_, _))
       //val newCounts = graph.mapReduceTriplets[Factor](
       //  e => Iterator((e.srcId, makeFactor(nt, e.attr)), (e.dstId, makeFactor(nt, e.attr))),
       //  (a, b) => { addEq(a,b); a } )
@@ -372,7 +407,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       // Recompute the global counts (the actual action)
       tempTimer = System.nanoTime()
       totalHist = graph.edges.map(e => e.attr)
-        .aggregate(DenseVector.zeros[Int](nt))(LDA.addEq(_, _), LDA.addEq(_, _))
+        .aggregate(new Array[Int](nt))(LDA.addEq(_, _), LDA.addEq(_, _))
       assert(totalHist.sum == nTokens)
       if (loggingTime && i % loggingInterval == 0) {
         globalCountsTimes += System.nanoTime() - tempTimer
@@ -454,13 +489,13 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     val logBeta = Gamma.logGamma(b)
     val logPWGivenZ =
       nTopics * (Gamma.logGamma(nw * b) - nw * logBeta) -
-      totalHist.data.map(v => Gamma.logGamma(v + nw * b)).reduce(_ + _) +
-      wordVertices.map({ case (id, f) => f.data.map(v => Gamma.logGamma(v + b)).reduce(_ + _)})
+      totalHist.map(v => Gamma.logGamma(v + nw * b)).sum +
+      wordVertices.map({ case (id, f) => f.map(v => Gamma.logGamma(v + b)).sum})
                   .reduce(_ + _)
     val logPZ =
       nd * (Gamma.logGamma(nt * a) - nt * logAlpha) +
       docVertices.map({ case (id, f) =>
-        f.data.map(v => Gamma.logGamma(v + a)).reduce(_ + _) - Gamma.logGamma(nt * a + f.data.reduce(_ + _))
+        f.map(v => Gamma.logGamma(v + a)).sum - Gamma.logGamma(nt * a + f.sum)
       }).reduce(_ + _)
     logPWGivenZ + logPZ
   }

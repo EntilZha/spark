@@ -20,6 +20,7 @@ package org.apache.spark.graphx.lib
 import breeze.linalg.{DenseVector}
 import org.apache.commons.math3.special.Gamma
 import org.apache.spark.SparkContext._
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.PartitionStrategy.{CanonicalRandomVertexCut, EdgePartition1D, EdgePartition2D, RandomVertexCut}
@@ -121,7 +122,7 @@ object LDA {
    * Re-samples the given token/triplet to a new topic
    * @param gen Random number generator
    * @param triplet Token to re-sample
-   * @param totalHist Total histogram of topics
+   * @param totalHistBroadcast Total histogram of topics
    * @param nt Number of topics
    * @param alpha Parameter for dirichlet prior on per document topic distributions
    * @param beta Parameter for the dirichlet prior on per topic word distributions
@@ -130,12 +131,13 @@ object LDA {
    */
   def sampleToken(gen:java.util.Random,
                   triplet:EdgeTriplet[Array[Int], TopicId],
-                  totalHist:Array[Int],
+                  totalHistBroadcast:Broadcast[Array[Int]],
+                  totalHistArgSorted:Broadcast[Array[Int]],
                   nt:Int,
                   alpha:Double,
                   beta:Double,
                   nw:Long):TopicId = {
-
+    val totalHist = totalHistBroadcast.value
     val wHist = triplet.srcAttr
     val dHist = triplet.dstAttr
     val oldTopic = triplet.attr
@@ -170,24 +172,22 @@ object LDA {
   }
   def fastSampleToken(gen:java.util.Random,
                       triplet:EdgeTriplet[Array[Int], TopicId],
-                      totalHist:Array[Int],
+                      totalHistBroadcast:Broadcast[Array[Int]],
+                      totalHistArgMinsBroadcast:Broadcast[Array[Int]],
                       nt:Int,
                       alpha:Double,
                       beta:Double,
                       nw:Long):TopicId = {
     val topic = triplet.attr
-    triplet.dstAttr(topic) -= 1
-    triplet.srcAttr(topic) -= 1
-    totalHist(topic) -= 1
     val aCounts = triplet.dstAttr
     val bCounts = triplet.srcAttr
-    val cCounts = new DenseVector(totalHist)
-    val sortedCCountsIndices = breeze.linalg.argsort(cCounts)
-    var sortedCCountsPosition = 0
+    val cCounts = totalHistBroadcast.value
+    val cArgMins = totalHistArgMinsBroadcast.value
+    aCounts(topic) -= 1
+    bCounts(topic) -= 1
+    cCounts(topic) -= 1
     var aSquareSum:Double = 0
     var bSquareSum:Double = 0
-    var cArgMin:Int = sortedCCountsIndices(sortedCCountsPosition)
-    var cMin:Int = cCounts(cArgMin)
     for (i <- 0 until nt) {
       aSquareSum += math.pow(aCounts(i) + alpha, 2)
       bSquareSum += math.pow(bCounts(i) + alpha, 2)
@@ -205,17 +205,7 @@ object LDA {
       val bSubtractTerm = math.pow(b, 2)
       aSquareSum = if (aSquareSum - aSubtractTerm > 0) aSquareSum - aSubtractTerm else 0
       bSquareSum = if (bSquareSum - bSubtractTerm > 0) bSquareSum - bSubtractTerm else 0
-      if (cArgMin <= k) {
-        var continue = true
-        while (sortedCCountsPosition < nt && continue) {
-          if (sortedCCountsIndices(sortedCCountsPosition) > k) {
-            cArgMin = sortedCCountsIndices(sortedCCountsPosition)
-            cMin = cCounts(cArgMin)
-            continue = false
-          }
-          sortedCCountsPosition += 1
-        }
-      }
+      val cMin = cArgMins(k)
       val aNorm = math.sqrt(aSquareSum)
       val bNorm = math.sqrt(bSquareSum)
       val cNorm = 1 / (cMin + nw * beta)
@@ -234,6 +224,34 @@ object LDA {
       }
     }
     throw new Exception("fast sample token failed")
+  }
+
+  /**
+   * Given a list, first uses argsort. For each i from 0 to nt, the position is the position of the argmin
+   * for elements in [i,nt)
+   * @param c Global counts histogram
+   * @return argmin list described above
+   */
+  def argminForShrinkingList(c:Array[Int], nt:Int):Array[Int] = {
+    val cArgSort:Array[Int] = breeze.linalg.argsort(new DenseVector(c)).toArray
+    var position = 0
+    val argMins = new Array[Int](nt)
+    argMins(0) = c(cArgSort(position))
+    for (i <- 1 until nt) {
+      var currArgMin = argMins(i - 1)
+      if (currArgMin < i) {
+        var continue = true
+        while (continue && position < nt) {
+          if (cArgSort(position) >= i) {
+            currArgMin = cArgSort(position)
+            continue = false
+          }
+          position += 1
+        }
+      }
+      argMins(i) = c(currArgMin)
+    }
+    return argMins
   }
 }
 
@@ -367,6 +385,8 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       }
       // Broadcast the topic histogram
       val totalHistbcast = sc.broadcast(totalHist)
+      val totalHistArgSort:Array[Int] = breeze.linalg.argsort(new DenseVector(totalHist)).toArray
+      val totalHistArgSortbcast = sc.broadcast(totalHistArgSort)
 
       // Shadowing because scala's closure capture would otherwise serialize the model object
       val a = alpha
@@ -381,7 +401,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       graph = graph.mapTriplets({(pid:PartitionID, iter:Iterator[EdgeTriplet[Array[Int], LDA.TopicId]]) =>
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
-          LDA.fastSampleToken(gen, token, totalHistbcast.value, nt, a, b, nw)
+          LDA.fastSampleToken(gen, token, totalHistbcast, totalHistArgSortbcast, nt, a, b, nw)
         })
       }, TripletFields.All)
       if (loggingTime && i % loggingInterval == 0) {

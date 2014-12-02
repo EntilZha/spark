@@ -97,7 +97,7 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
     val topicId0:TopicId = 0
     val topicId1:TopicId = 1
     val nTopics = 5
-    val f = DenseVector.zeros[Int](nTopics)
+    val f = new Array[Int](nTopics)
     f(0) = 1
     f(1) = 0
     LDA.makeFactor(nTopics, topicId0) should equal (f)
@@ -106,25 +106,25 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
     LDA.makeFactor(nTopics, topicId1) should equal (f)
   }
   test("Add topic to Factor") {
-    val f = DenseVector.zeros[Int](2)
+    val f = new Array[Int](2)
     f(0) = 1
     f(1) = 5
     val result = LDA.addEq(f, 0)
-    val fExpect = DenseVector.zeros[Int](2)
+    val fExpect = new Array[Int](2)
     fExpect(0) = 2
     fExpect(1) = 5
     f should equal (fExpect)
     result should equal (fExpect)
   }
   test("Add two factors together") {
-    val f1 = DenseVector.zeros[Int](2)
-    val f2 = DenseVector.zeros[Int](2)
+    val f1 = new Array[Int](2)
+    val f2 = new Array[Int](2)
     f1(0) = 2
     f1(1) = 4
     f2(0) = 5
     f2(1) = 2
     val result = LDA.addEq(f1, f2)
-    val fExpect = DenseVector.zeros[Int](2)
+    val fExpect = new Array[Int](2)
     fExpect(0) = 7
     fExpect(1) = 6
     result should be (fExpect)

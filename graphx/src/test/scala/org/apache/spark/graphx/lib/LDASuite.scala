@@ -20,7 +20,7 @@ package org.apache.spark.graphx.lib
 import breeze.linalg.DenseVector
 import org.apache.spark.SparkContext._
 import org.apache.spark.graphx._
-import org.apache.spark.graphx.lib.LDA.{DocId, Factor, TopicId, WordId}
+import org.apache.spark.graphx.lib.LDA.{DocId, Topic, WordId}
 import org.apache.spark.rdd._
 import org.scalatest.{FunSuite, Matchers}
 
@@ -94,8 +94,8 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
     }
   }
   test("Construct a factor from number of topics and a new topic") {
-    val topicId0:TopicId = 0
-    val topicId1:TopicId = 1
+    val topicId0:Topic = LDA.combineTopics(0, 0)
+    val topicId1:Topic = LDA.combineTopics(1, 1)
     val nTopics = 5
     val f = new Array[Int](nTopics)
     f(0) = 1
@@ -129,6 +129,18 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
     fExpect(1) = 6
     result should be (fExpect)
     f1 should be (fExpect)
+  }
+  test("Create and recover topics stored in Long Topic") {
+    var t1 = 0
+    var t2 = 1
+    var topic = LDA.combineTopics(t1, t2)
+    LDA.currentTopic(topic) should equal (t1)
+    LDA.oldTopic(topic) should equal (t2)
+    t1 = 5
+    t2 = 3
+    topic = LDA.combineTopics(t1, t2)
+    LDA.currentTopic(topic) should equal (t1)
+    LDA.oldTopic(topic) should equal (t2)
   }
 //  test("Benchmark LDA.sampleToken") {
 //    val nTopics = 100

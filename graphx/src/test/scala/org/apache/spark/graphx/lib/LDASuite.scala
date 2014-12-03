@@ -100,16 +100,16 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
     val f = new Array[Int](nTopics)
     f(0) = 1
     f(1) = 0
-    LDA.makeFactor(nTopics, topicId0) should equal (f)
+    LDA.makeHistogram(nTopics, topicId0) should equal (f)
     f(0) = 0
     f(1) = 1
-    LDA.makeFactor(nTopics, topicId1) should equal (f)
+    LDA.makeHistogram(nTopics, topicId1) should equal (f)
   }
   test("Add topic to Factor") {
     val f = new Array[Int](2)
     f(0) = 1
     f(1) = 5
-    val result = LDA.addEq(f, 0)
+    val result = LDA.combineTopicIntoHistogram(f, 0)
     val fExpect = new Array[Int](2)
     fExpect(0) = 2
     fExpect(1) = 5
@@ -123,7 +123,7 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
     f1(1) = 4
     f2(0) = 5
     f2(1) = 2
-    val result = LDA.addEq(f1, f2)
+    val result = LDA.combineHistograms(f1, f2)
     val fExpect = new Array[Int](2)
     fExpect(0) = 7
     fExpect(1) = 6

@@ -48,7 +48,7 @@ object LDA {
    * @param b Second factor
    * @return Sum of factors
    */
-  def addEq(a:Array[Int], b:Array[Int]):Array[Int] = {
+  def combineHistograms(a:Array[Int], b:Array[Int]):Array[Int] = {
     assert(a.size == b.size)
     var i = 0
     while (i < a.size) {
@@ -64,7 +64,7 @@ object LDA {
    * @param t topic to add
    * @return Result of adding topic into factor.
    */
-  def addEq(a:Array[Int], t:TopicId):Array[Int] = { a(t) += 1; a }
+  def combineTopicIntoHistogram(a:Array[Int], t:TopicId):Array[Int] = { a(t) += 1; a }
 
   /**
    * Creates a factor with topic added to it.
@@ -72,7 +72,7 @@ object LDA {
    * @param topic Topic to start with
    * @return New factor with topic added to it
    */
-  def makeFactor(nTopics: Int, topic: TopicId):Array[Int] = {
+  def makeHistogram(nTopics: Int, topic: TopicId):Array[Int] = {
     val f = new Array[Int](nTopics)
     f(topic) += 1
     f
@@ -299,8 +299,8 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       }
     // Compute the topic histograms (factors) for each word and document
     val newCounts = gTmp.mapReduceTriplets[Array[Int]](
-      e => Iterator((e.srcId, makeFactor(nT, e.attr)), (e.dstId, makeFactor(nT, e.attr))),
-      (a, b) => addEq(a,b) )
+      e => Iterator((e.srcId, makeHistogram(nT, e.attr)), (e.dstId, makeHistogram(nT, e.attr))),
+      (a, b) => combineHistograms(a,b) )
     // Update the graph with the factors
     gTmp.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
   }
@@ -336,7 +336,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    * The total counts for each topic
    */
   var totalHist = graph.edges.map(e => e.attr)
-    .aggregate(new Array[Int](nTopics))(LDA.addEq(_, _), LDA.addEq(_, _))
+    .aggregate(new Array[Int](nTopics))(LDA.combineTopicIntoHistogram(_, _), LDA.combineHistograms(_, _))
 
   /**
    * List to track time spent doing Gibbs sampling
@@ -414,11 +414,11 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
 
       val newCounts = graph.triplets
                          .flatMap(e => {Iterator((e.srcId, e.attr), (e.dstId, e.attr))})
-                         .aggregateByKey(new Array[Int](nt))(LDA.addEq(_, _), LDA.addEq(_, _))
+                         .aggregateByKey(new Array[Int](nt))(LDA.combineTopicIntoHistogram(_, _), LDA.combineHistograms(_, _))
       //val newCounts = graph.mapReduceTriplets[Factor](
       //  e => Iterator((e.srcId, makeFactor(nt, e.attr)), (e.dstId, makeFactor(nt, e.attr))),
       //  (a, b) => { addEq(a,b); a } )
-      graph = graph.outerJoinVertices(newCounts) { (_, _, newFactorOpt) => newFactorOpt.get }.cache
+      graph = graph.outerJoinVertices(newCounts)({(_, _, newFactorOpt) => newFactorOpt.get }).cache
       if (loggingTime && i % loggingInterval == 0) {
         graph.cache.triplets.count()
         updateCountsTimes += System.nanoTime() - tempTimer
@@ -427,7 +427,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       // Recompute the global counts (the actual action)
       tempTimer = System.nanoTime()
       totalHist = graph.edges.map(e => e.attr)
-        .aggregate(new Array[Int](nt))(LDA.addEq(_, _), LDA.addEq(_, _))
+        .aggregate(new Array[Int](nt))(LDA.combineTopicIntoHistogram(_, _), LDA.combineHistograms(_, _))
       assert(totalHist.sum == nTokens)
       if (loggingTime && i % loggingInterval == 0) {
         globalCountsTimes += System.nanoTime() - tempTimer

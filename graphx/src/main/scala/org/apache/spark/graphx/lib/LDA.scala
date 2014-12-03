@@ -53,7 +53,6 @@ object LDA {
   def combineTopics(currentTopic:Int, oldTopic:Int): Topic = {
     (currentTopic.asInstanceOf[Long] << 32) | (oldTopic & 0xffffffffL)
   }
-
   /**
    * Sums two factors together into a, then returns it. This increases memory efficiency
    * and reduces garbage collection.
@@ -425,16 +424,37 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       // Update the counts
       tempTimer = System.nanoTime()
 
-      val newCounts = graph.triplets
-                         .flatMap(e => {Iterator((e.srcId, e.attr), (e.dstId, e.attr))})
-                         .aggregateByKey(new Array[Int](nt))(LDA.combineTopicIntoHistogram(_, _), LDA.combineHistograms(_, _))
+      //val newCounts = graph.triplets
+      //                   .flatMap(e => {Iterator((e.srcId, e.attr), (e.dstId, e.attr))})
+      //                   .aggregateByKey(new Array[Int](nt))(LDA.combineTopicIntoHistogram(_, _), LDA.combineHistograms(_, _))
       // Stores a list of deltas per vertex. Each delta is a Topic, which packs two Ints into a Long
       // The left Int is the new topic, the right Int is the old topic
-      val deltas = graph.aggregateMessages[Iterator[Topic]]({context =>
-        context.attr
-      }, _ ++ _)
+      val deltas = graph.aggregateMessages[ListBuffer[Topic]]({context =>
+        val currentTopic = LDA.currentTopic(context.attr)
+        val oldTopic = LDA.oldTopic(context.attr)
+        if (currentTopic != oldTopic) {
+          val message = new ListBuffer[LDA.Topic]()
+          message += context.attr
+          context.sendToDst(message)
+          context.sendToSrc(message)
+        }
+      }, _ ++= _, TripletFields.EdgeOnly)
 
-      graph = graph.outerJoinVertices(newCounts)({(_, _, newFactorOpt) => newFactorOpt.get }).cache
+      graph = graph.outerJoinVertices(deltas)({(_, histogram, vertexDeltasOption) =>
+        if (vertexDeltasOption.isDefined) {
+          val vertexDeltas = vertexDeltasOption.get.iterator
+          while (vertexDeltas.hasNext) {
+            val topic = vertexDeltas.next()
+            val currentTopic = LDA.currentTopic(topic)
+            val oldTopic = LDA.oldTopic(topic)
+            histogram(oldTopic) -= 1
+            histogram(currentTopic) += 1
+          }
+        }
+        histogram
+      }).cache
+
+      //graph = graph.outerJoinVertices(newCounts)({(_, _, newFactorOpt) => newFactorOpt.get }).cache
       if (loggingTime && i % loggingInterval == 0) {
         graph.cache.triplets.count()
         updateCountsTimes += System.nanoTime() - tempTimer

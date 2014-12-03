@@ -17,7 +17,7 @@
 
 package org.apache.spark.graphx.lib
 
-import breeze.linalg.{DenseVector}
+import breeze.linalg.{SparseVector, DenseVector}
 import org.apache.commons.math3.special.Gamma
 import org.apache.spark.SparkContext._
 import org.apache.spark.broadcast.Broadcast
@@ -28,7 +28,6 @@ import org.apache.spark.graphx.util.TimeTracker
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.BoundedPriorityQueue
 import scala.collection.mutable
-import scala.collection.mutable.ListBuffer
 
 /**
  * LDA contains utility methods used in the LDA class. These are mostly
@@ -76,7 +75,16 @@ object LDA {
    * @param topic topic to add
    * @return Result of adding topic into factor.
    */
-  def combineTopicIntoHistogram(a:Array[Int], topic:Topic): Array[Int] = { a(LDA.currentTopic(topic)) += 1; a }
+  def combineTopicIntoHistogram(a:Array[Int], topic:Topic): Array[Int] = {
+    a(LDA.currentTopic(topic)) += 1
+    a
+  }
+
+  def combineDeltaIntoHistogram(a:Array[Int], topic:Topic): Array[Int] = {
+    a(LDA.oldTopic(topic)) -= 1
+    a(LDA.currentTopic(topic)) += 1
+    a
+  }
 
   /**
    * Creates a factor with topic added to it.
@@ -353,22 +361,22 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
   /**
    * List to track time spent doing Gibbs sampling
    */
-  val resampleTimes = new ListBuffer[Long]()
+  val resampleTimes = new mutable.ListBuffer[Long]()
 
   /**
    * List to track time spent updating the counts on the graph
    */
-  val updateCountsTimes = new ListBuffer[Long]()
+  val updateCountsTimes = new mutable.ListBuffer[Long]()
 
   /**
    * List to track time spent updating the global topic histogram
    */
-  val globalCountsTimes = new ListBuffer[Long]()
+  val globalCountsTimes = new mutable.ListBuffer[Long]()
 
   /**
    * List to track negative log likelihood
    */
-  val likelihoods = new ListBuffer[Double]()
+  val likelihoods = new mutable.ListBuffer[Double]()
 
   /**
    * The internal iteration tracks the number of times the random number
@@ -410,7 +418,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       var tempTimer:Long = System.nanoTime()
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
-      graph = graph.mapTriplets({(pid:PartitionID, iter:Iterator[EdgeTriplet[Array[Int], LDA.Topic]]) =>
+      graph = graph.mapTriplets({(pid:PartitionID, iter:Iterator[EdgeTriplet[Array[Int], Topic]]) =>
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
           LDA.sampleToken(gen, token, totalHistbcast, totalHistArgSortbcast, nt, a, b, nw)
@@ -427,31 +435,26 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       //val newCounts = graph.triplets
       //                   .flatMap(e => {Iterator((e.srcId, e.attr), (e.dstId, e.attr))})
       //                   .aggregateByKey(new Array[Int](nt))(LDA.combineTopicIntoHistogram(_, _), LDA.combineHistograms(_, _))
-      // Stores a list of deltas per vertex. Each delta is a Topic, which packs two Ints into a Long
-      // The left Int is the new topic, the right Int is the old topic
-      val deltas = graph.aggregateMessages[ListBuffer[Topic]]({context =>
-        val currentTopic = LDA.currentTopic(context.attr)
-        val oldTopic = LDA.oldTopic(context.attr)
-        if (currentTopic != oldTopic) {
-          val message = new ListBuffer[LDA.Topic]()
-          message += context.attr
-          context.sendToDst(message)
-          context.sendToSrc(message)
-        }
-      }, _ ++= _, TripletFields.EdgeOnly)
+      val deltas = graph.edges
+        .flatMap(e => {
+            val topic = e.attr
+            val old = LDA.oldTopic(topic)
+            val current = LDA.currentTopic(topic)
+            var result:Iterator[(VertexId, Topic)] = Iterator.empty
+            if (old != current) {
+              result = Iterator((e.srcId, e.attr), (e.dstId, e.attr))
+            }
+            result
+          })
+        .aggregateByKey(new Array[Int](nt))(LDA.combineDeltaIntoHistogram(_, _), LDA.combineHistograms(_, _))
 
       graph = graph.outerJoinVertices(deltas)({(_, histogram, vertexDeltasOption) =>
         if (vertexDeltasOption.isDefined) {
-          val vertexDeltas = vertexDeltasOption.get.iterator
-          while (vertexDeltas.hasNext) {
-            val topic = vertexDeltas.next()
-            val currentTopic = LDA.currentTopic(topic)
-            val oldTopic = LDA.oldTopic(topic)
-            histogram(oldTopic) -= 1
-            histogram(currentTopic) += 1
-          }
+          val vertexDeltas = vertexDeltasOption.get
+          (histogram, vertexDeltas).zipped.map(_ + _)
+        } else {
+          histogram.clone()
         }
-        histogram
       }).cache
 
       //graph = graph.outerJoinVertices(newCounts)({(_, _, newFactorOpt) => newFactorOpt.get }).cache

@@ -34,6 +34,7 @@ import scala.collection.mutable
 object LDA {
   type DocId = VertexId
   type WordId = VertexId
+  val DocIdValue:DocId = -1L
   /**
    * Topic Long is composed of two Ints representint topics.
    * The left Int represents the current topic, right Int represents prior topic.
@@ -42,7 +43,7 @@ object LDA {
 
   case class Histogram(counts:Counts, argsort:Argsort) extends Serializable
   type Counts = Array[Int]
-  type Argsort = Array[Int]
+  type Argsort = Option[Array[Int]]
 
   class Posterior(docs: VertexRDD[Histogram], words: VertexRDD[Histogram])
 
@@ -102,8 +103,8 @@ object LDA {
     counts
   }
 
-  def makeHistogramFromCounts(counts:Counts): Histogram = {
-    val argsort:Argsort = breeze.linalg.argsort(new DenseVector(counts)).toArray
+  def makeHistogramFromCounts(counts:Counts, vid:VertexId): Histogram = {
+    val argsort:Argsort = if (vid < 0) Option(breeze.linalg.argsort(new DenseVector(counts)).toArray) else Option.empty[Array[Int]]
     Histogram(counts, argsort)
   }
 
@@ -219,7 +220,7 @@ object LDA {
     val aCounts = triplet.dstAttr.counts
     val bCounts = triplet.srcAttr.counts
     val cCounts = totalHistogram.counts
-    val cArgMins = totalHistogram.argsort
+    val cArgMins = totalHistogram.argsort.get
     var aSquareSum: Double = 0
     var bSquareSum: Double = 0
     for (i <- 0 until nt) {
@@ -337,7 +338,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       (a, b) => combineCounts(a,b)
     )
     // Update the graph with the factors
-    gTmp.outerJoinVertices(newCounts)({(_, _, newFactorOpt) => makeHistogramFromCounts(newFactorOpt.get) }).cache()
+    gTmp.outerJoinVertices(newCounts)({(vid, _, newFactorOpt) => makeHistogramFromCounts(newFactorOpt.get, vid) }).cache()
   }
 
   /**
@@ -371,7 +372,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    * The total counts for each topic
    */
   var totalHistogram = makeHistogramFromCounts(graph.edges.map(e => e.attr)
-    .aggregate(new Counts(nTopics))(LDA.combineTopicIntoCounts, LDA.combineCounts))
+    .aggregate(new Counts(nTopics))(LDA.combineTopicIntoCounts, LDA.combineCounts), DocIdValue)
 
   /**
    * List to track time spent doing Gibbs sampling
@@ -462,13 +463,13 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           })
         .aggregateByKey(new Array[Int](nt))(LDA.combineDeltaIntoCounts, LDA.combineCounts)
 
-      graph = graph.outerJoinVertices(deltas)({(_, oldHistogram, vertexDeltasOption) =>
+      graph = graph.outerJoinVertices(deltas)({(vid, oldHistogram, vertexDeltasOption) =>
         if (vertexDeltasOption.isDefined) {
           val vertexDeltas = vertexDeltasOption.get
           val counts = (oldHistogram.counts, vertexDeltas).zipped.map(_ + _)
-          makeHistogramFromCounts(counts)
+          makeHistogramFromCounts(counts, vid)
         } else {
-          makeHistogramFromCounts(oldHistogram.counts)
+          makeHistogramFromCounts(oldHistogram.counts, vid)
         }
       }).cache()
 
@@ -481,7 +482,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       // Recompute the global counts (the actual action)
       tempTimer = System.nanoTime()
       totalHistogram = makeHistogramFromCounts(graph.edges.map(e => e.attr)
-        .aggregate(new Array[Int](nt))(LDA.combineTopicIntoCounts, LDA.combineCounts))
+        .aggregate(new Array[Int](nt))(LDA.combineTopicIntoCounts, LDA.combineCounts), DocIdValue)
       assert(totalHistogram.counts.sum == nTokens)
       if (loggingTime && i % loggingInterval == 0) {
         globalCountsTimes += System.nanoTime() - tempTimer

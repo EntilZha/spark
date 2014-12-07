@@ -20,7 +20,7 @@ package org.apache.spark.graphx.lib
 import breeze.linalg.DenseVector
 import org.apache.spark.SparkContext._
 import org.apache.spark.graphx._
-import org.apache.spark.graphx.lib.LDA.{DocId, Topic, WordId}
+import org.apache.spark.graphx.lib.LDA.{Histogram, DocId, Topic, WordId}
 import org.apache.spark.rdd._
 import org.scalatest.{FunSuite, Matchers}
 
@@ -141,6 +141,23 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
     topic = LDA.combineTopics(t1, t2)
     LDA.currentTopic(topic) should equal (t1)
     LDA.oldTopic(topic) should equal (t2)
+  }
+  test("Maintain histogram argsort") {
+    val a = Array(3, 2, 4, 0, 6)
+    val argsort = Array(4, 2, 0, 1, 3)
+    val deltas = Array(-1, -1, 2, 10, -6)
+    val argsortExpect = Array(3, 2, 0, 1, 4)
+    val histogram = LDA.makeHistogramFromCounts(a, LDA.IndexTrue)
+    val result = LDA.applyDeltasToHistogram(histogram, deltas)
+    result.index.get.argsort should equal (argsortExpect)
+  }
+  test("Maintain single argsort with single delta") {
+    val a = Array(2, 3, 1)
+    val histogram = LDA.makeHistogramFromCounts(a, LDA.IndexTrue)
+    LDA.applyDeltaToHistogram(histogram, 0, 2)
+    val argsort = histogram.index.get.argsort
+    val argsortExpect = Array(0, 1, 2)
+    argsort should equal (argsortExpect)
   }
 //  test("Benchmark LDA.sampleToken") {
 //    val nTopics = 100

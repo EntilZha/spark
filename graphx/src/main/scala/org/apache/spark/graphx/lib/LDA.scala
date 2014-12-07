@@ -20,7 +20,7 @@ package org.apache.spark.graphx.lib
 import breeze.linalg.DenseVector
 import org.apache.commons.math3.special.Gamma
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.Logging
+import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.util.TimeTracker
 import org.apache.spark.rdd.RDD
@@ -34,16 +34,25 @@ import scala.collection.mutable
 object LDA {
   type DocId = VertexId
   type WordId = VertexId
-  val DocIdValue:DocId = -1L
+  /**
+   * These two variables are used for turning indexing on and off when creating new histograms
+   */
+  val IndexTrue:DocId = -1L
+  val IndexFalse:WordId = 1L
   /**
    * Topic Long is composed of two Ints representint topics.
    * The left Int represents the current topic, right Int represents prior topic.
    */
   type Topic = Long
 
-  case class Histogram(counts:Counts, argsort:Argsort) extends Serializable
+  case class Histogram(counts:Counts, index:Option[Index]) extends Serializable
   type Counts = Array[Int]
-  type Argsort = Option[Array[Int]]
+  /**
+   * Index holds two arrays which contain:
+   * First: argsort of the counts from max to min
+   * Second: for each topic, its position in the argsort
+   */
+  case class Index(argsort:Array[Int], lookup:Array[Int]) extends Serializable
 
   class Posterior(docs: VertexRDD[Histogram], words: VertexRDD[Histogram])
 
@@ -92,6 +101,63 @@ object LDA {
   }
 
   /**
+   * Apply the deltas from a prior iteration to the histogram. Operation
+   * is in place, and maintains the argsort. It is assumed that the deltas
+   * are small enough to make the bubblesort used fast. Additionally, does not
+   * mutate oldHistogram
+   * @param oldHistogram
+   * @param deltas
+   * @return
+   */
+  def applyDeltasToHistogram(oldHistogram:Histogram, deltas:Array[Int]): Histogram = {
+    if (oldHistogram.index.isEmpty) {
+      val counts = oldHistogram.counts.zip(deltas).map({case (v, d) => v + d})
+      makeHistogramFromCounts(counts, IndexFalse)
+    } else {
+      val index = Index(oldHistogram.index.get.argsort.clone(), oldHistogram.index.get.lookup.clone())
+      val histogram = Histogram(oldHistogram.counts.clone(), Option(index))
+      val counts = histogram.counts
+      val argsort = index.argsort
+      for (k <- 0 until deltas.length) {
+        if (deltas(k) != 0) {
+          applyDeltaToHistogram(histogram, k, deltas(k))
+        }
+      }
+      histogram
+    }
+  }
+  def applyDeltaToHistogram(oldHistogram:Histogram, topic:Int, delta:Int): Unit = {
+    val counts = oldHistogram.counts
+    val index = oldHistogram.index.get
+    val argsort = index.argsort
+    val lookup = index.lookup
+    counts(topic) += delta
+    val c = counts(topic)
+    var i = lookup(topic)
+    if (delta > 0) {
+      while (i > 0 && c > counts(argsort(i - 1))) {
+        var tmp = argsort(i)
+        argsort(i) = argsort(i - 1)
+        argsort(i - 1) = tmp
+        tmp = lookup(argsort(i))
+        lookup(argsort(i)) = lookup(argsort(i - 1))
+        lookup(argsort(i - 1)) = tmp
+        i -= 1
+      }
+    } else if (delta < 0) {
+      while (i < counts.length - 1 && c < counts(argsort(i + 1))) {
+        var tmp = argsort(i)
+        argsort(i) = argsort(i + 1)
+        argsort(i + 1) = tmp
+        tmp = lookup(argsort(i))
+        lookup(argsort(i)) = lookup(argsort(i + 1))
+        lookup(argsort(i + 1)) = tmp
+        i += 1
+      }
+    }
+  }
+
+  /**
    * Creates a factor with topic added to it.
    * @param nTopics Number of topics
    * @param topic Topic to start with
@@ -103,9 +169,26 @@ object LDA {
     counts
   }
 
+  /**
+   * Creates a new histogram from counts, counts becomes part of the new histogram
+   * object.
+   * @param counts
+   * @param vid
+   * @return
+   */
   def makeHistogramFromCounts(counts:Counts, vid:VertexId): Histogram = {
-    val argsort:Argsort = if (vid < 0) Option(breeze.linalg.argsort(new DenseVector(counts)).toArray) else Option.empty[Array[Int]]
-    Histogram(counts, argsort)
+    if (vid < 0) {
+      val argsort = breeze.linalg.argsort(new DenseVector(counts)).toArray.reverse
+      val lookup = new Array[Int](counts.length)
+      for (i <- 0 until lookup.length) {
+        val topic = argsort(i)
+        lookup(topic) = i
+      }
+      val index = Index(argsort, lookup)
+      Histogram(counts, Option(index))
+    } else {
+      Histogram(counts, Option.empty)
+    }
   }
 
   /**
@@ -152,7 +235,7 @@ object LDA {
    * Re-samples the given token/triplet to a new topic
    * @param gen Random number generator
    * @param triplet Token to re-sample
-   * @param totalHistogramBroadcast Total histogram of topics
+   * @param totalHistogram roadcast Total histogram of topics
    * @param nt Number of topics
    * @param alpha Parameter for dirichlet prior on per document topic distributions
    * @param beta Parameter for the dirichlet prior on per topic word distributions
@@ -161,12 +244,13 @@ object LDA {
    */
   def sampleToken(gen: java.util.Random,
                   triplet: EdgeTriplet[Histogram, Topic],
-                  totalHistogramBroadcast: Broadcast[Histogram],
+                  totalHistogram: Histogram,
+                  totalNorm: Double,
                   nt: Int,
                   alpha: Double,
                   beta: Double,
                   nw: Long): Topic = {
-    val totalCounts = totalHistogramBroadcast.value.counts
+    val totalCounts = totalHistogram.counts
     val wHist = triplet.srcAttr.counts
     val dHist = triplet.dstAttr.counts
     val oldTopic = LDA.currentTopic(triplet.attr)
@@ -210,49 +294,53 @@ object LDA {
 
   def fastSampleToken(gen: java.util.Random,
                       triplet: EdgeTriplet[Histogram, Topic],
-                      totalHistogramBroadcast: Broadcast[Histogram],
+                      totalHistogram: Histogram,
+                      totalNorm: Double,
                       nt: Int,
                       alpha: Double,
                       beta: Double,
                       nw: Long): Topic = {
     val topic = LDA.currentTopic(triplet.attr)
-    val totalHistogram = totalHistogramBroadcast.value
+    val topicOrder = triplet.dstAttr.index.get.argsort
     val aCounts = triplet.dstAttr.counts
     val bCounts = triplet.srcAttr.counts
     val cCounts = totalHistogram.counts
-    val cArgMins = totalHistogram.argsort.get
     var aSquareSum: Double = 0
     var bSquareSum: Double = 0
+    var cSquareSum: Double = totalNorm
+    cSquareSum -= math.pow(1 / (cCounts(topic) + nw * beta), 3)
+    cSquareSum += math.pow(1 / (cCounts(topic) - 1 + nw * beta), 3)
     for (i <- 0 until nt) {
-      aSquareSum += math.pow(countWithoutTopic(aCounts, i, topic) + alpha, 2)
-      bSquareSum += math.pow(countWithoutTopic(bCounts, i, topic) + alpha, 2)
+      aSquareSum += math.pow(countWithoutTopic(aCounts, i, topic) + alpha, 3)
+      bSquareSum += math.pow(countWithoutTopic(bCounts, i, topic) + alpha, 3)
     }
     val zBound = new Array[Double](nt)
     val sumP = new Array[Double](nt)
     var u = gen.nextDouble()
-    for (k <- 0 until nt) {
+    val oneThird = 1D / 3D
+    for (i <- 0 until nt) {
+      val k = topicOrder(i)
       val a = countWithoutTopic(aCounts, k, topic) + alpha
       val b = countWithoutTopic(bCounts, k, topic) + beta
-      val c = 1 / (countWithoutTopic(cCounts, k, topic) + beta * nw)
-      val priorSumP = if (k == 0) 0 else sumP(k - 1)
-      sumP(k) = priorSumP + a * b * c
-      val aSubtractTerm = math.pow(a, 2)
-      val bSubtractTerm = math.pow(b, 2)
+      val c = 1D / (countWithoutTopic(cCounts, k, topic) + beta * nw)
+      val priorSumP = if (i == 0) 0 else sumP(i - 1)
+      sumP(i) = priorSumP + a * b * c
+      val aSubtractTerm = math.pow(a, 3)
+      val bSubtractTerm = math.pow(b, 3)
+      val cSubtractTerm = math.pow(c, 3)
       aSquareSum = if (aSquareSum - aSubtractTerm > 0) aSquareSum - aSubtractTerm else 0
       bSquareSum = if (bSquareSum - bSubtractTerm > 0) bSquareSum - bSubtractTerm else 0
-      val cMin = cArgMins(k)
-      val aNorm = math.sqrt(aSquareSum)
-      val bNorm = math.sqrt(bSquareSum)
-      val cNorm = 1 / (cMin + nw * beta)
-      zBound(k) = sumP(k) + aNorm * bNorm * cNorm
-      if (u * zBound(k) <= sumP(k)) {
-        if (k == 0 || u * zBound(k) > priorSumP) {
+      cSquareSum = if (cSquareSum - cSubtractTerm > 0) cSquareSum - cSubtractTerm else 0
+      val norm = math.pow(aSquareSum * bSquareSum * cSquareSum, oneThird)
+      zBound(i) = sumP(i) + norm
+      if (u * zBound(i) <= sumP(i)) {
+        if (i == 0 || u * zBound(i) > priorSumP) {
           return LDA.combineTopics(k, topic)
         } else {
-          u = (u * zBound(k - 1) - priorSumP) * zBound(k) / (zBound(k - 1) - zBound(k))
-          for (t <- 0 until k) {
+          u = (u * zBound(i - 1) - priorSumP) * zBound(i) / (zBound(i - 1) - zBound(i))
+          for (t <- 0 until i) {
             if (sumP(t) >= u) {
-              return LDA.combineTopics(t, topic)
+              return LDA.combineTopics(topicOrder(t), topic)
             }
           }
         }
@@ -260,33 +348,13 @@ object LDA {
     }
     throw new Exception("fast sample token failed")
   }
-
-  /**
-   * Given a list, first uses argsort. For each i from 0 to nt, the position is the position of the argmin
-   * for elements in [i,nt)
-   * @param c Global counts histogram
-   * @return argmin list described above
-   */
-  def argminForShrinkingList(c: Array[Int], nt: Int): Array[Int] = {
-    val cArgSort: Array[Int] = breeze.linalg.argsort(new DenseVector(c)).toArray
-    var position = 0
-    val argMins = new Array[Int](nt)
-    argMins(0) = c(cArgSort(position))
-    for (i <- 1 until nt) {
-      var currArgMin = argMins(i - 1)
-      if (currArgMin < i) {
-        var continue = true
-        while (continue && position < nt) {
-          if (cArgSort(position) >= i) {
-            currArgMin = cArgSort(position)
-            continue = false
-          }
-          position += 1
-        }
+  def isArgSorted(arr:Array[Int], order:Array[Int]): Boolean = {
+    for (i <- 1 until arr.length) {
+      if (arr(order(i)) > arr(order(i - 1))) {
+        return false
       }
-      argMins(i) = c(currArgMin)
     }
-    argMins
+    true
   }
 }
 
@@ -307,107 +375,88 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           val loggingInterval: Int = 0,
           val loggingLikelihood: Boolean = false,
           val loggingTime: Boolean = false) extends Serializable with Logging {
-  import org.apache.spark.graphx.lib.LDA._
-
-  val timer = new TimeTracker()
-  timer.start("setup")
-  logInfo("Starting LDA setup")
-  private val sc = tokens.sparkContext
-
-  /**
-   * The bipartite terms by document graph.
-   */
-  private var graph: Graph[Histogram, Topic] = {
-    // To setup a bipartite graph it is necessary to ensure that the document and
-    // word ids are in a different namespace
-    val renumbered = tokens.map({ case (wordId, docId) =>
-      assert(wordId >= 0)
-      assert(docId >= 0)
-      val newDocId: DocId = -(docId + 1L)
-      (wordId, newDocId)
-    })
-    val nT = nTopics
-    // Sample the tokens
-    val gTmp = Graph.fromEdgeTuples(renumbered, false).mapEdges({ (pid, iter) =>
-        val gen = new java.util.Random(pid)
-        iter.map(e => LDA.combineTopics(gen.nextInt(nT), 0))
-    })
-    // Compute the topic histograms (factors) for each word and document
-    val newCounts = gTmp.mapReduceTriplets[Counts](
-      e => Iterator((e.srcId, makeCountsFromTopic(nT, e.attr)), (e.dstId, makeCountsFromTopic(nT, e.attr))),
-      (a, b) => combineCounts(a,b)
-    )
-    // Update the graph with the factors
-    gTmp.outerJoinVertices(newCounts)({(vid, _, newFactorOpt) => makeHistogramFromCounts(newFactorOpt.get, vid) }).cache()
-  }
+  var timer: TimeTracker = null
+  private var sc: SparkContext = null
+  private var graph: Graph[LDA.Histogram, LDA.Topic] = null
+  var nWords: Long = 0
+  var nDocs: Long = 0
+  var nTokens: Long = 0
+  var totalHistogram: LDA.Histogram = null
+  var resampleTimes: mutable.ListBuffer[Long] = null
+  var updateCountsTimes: mutable.ListBuffer[Long] = null
+  var globalCountsTimes:mutable.ListBuffer[Long] = null
+  var likelihoods: mutable.ListBuffer[Double] = null
+  private var internalIteration = 1
+  var modelIsSetup: Boolean = false
 
   /**
    * Get the word vertices by filtering on non-negative vertices
    * @return Word vertices
    */
-  def wordVertices: VertexRDD[Histogram] = graph.vertices.filter{ case (vid, c) => vid >= 0 }
+  def wordVertices: VertexRDD[LDA.Histogram] = graph.vertices.filter{ case (vid, c) => vid >= 0 }
 
   /**
    * Get the document vertices by filtering on negative vertices
    * @return Document vertices
    */
-  def docVertices: VertexRDD[Histogram] = graph.vertices.filter{ case (vid, c) => vid < 0 }
+  def docVertices: VertexRDD[LDA.Histogram] = graph.vertices.filter{ case (vid, c) => vid < 0 }
 
-  /**
-   * The number of unique words in the corpus
-   */
-  val nWords = wordVertices.count()
-
-  /**
-   * The number of documents in the corpus
-   */
-  val nDocs = docVertices.count()
-
-  /**
-   * The number of tokens
-   */
-  val nTokens = graph.edges.count()
-
-  /**
-   * The total counts for each topic
-   */
-  var totalHistogram = makeHistogramFromCounts(graph.edges.map(e => e.attr)
-    .aggregate(new Counts(nTopics))(LDA.combineTopicIntoCounts, LDA.combineCounts), DocIdValue)
-
-  /**
-   * List to track time spent doing Gibbs sampling
-   */
-  val resampleTimes = new mutable.ListBuffer[Long]()
-
-  /**
-   * List to track time spent updating the counts on the graph
-   */
-  val updateCountsTimes = new mutable.ListBuffer[Long]()
-
-  /**
-   * List to track time spent updating the global topic histogram
-   */
-  val globalCountsTimes = new mutable.ListBuffer[Long]()
-
-  /**
-   * List to track negative log likelihood
-   */
-  val likelihoods = new mutable.ListBuffer[Double]()
-
-  /**
-   * The internal iteration tracks the number of times the random number
-   * generator was created.  In constructing the graph the generated is created
-   * once and then once for each iteration
-   */
-  private var internalIteration = 1
-  logInfo("LDA setup finished")
-  timer.stop("setup")
+  def setup(): Unit = {
+    timer = new TimeTracker()
+    resampleTimes = new mutable.ListBuffer[Long]()
+    updateCountsTimes = new mutable.ListBuffer[Long]()
+    globalCountsTimes = new mutable.ListBuffer[Long]()
+    likelihoods = new mutable.ListBuffer[Double]()
+    timer.start("setup")
+    logInfo("Starting LDA setup")
+    sc = tokens.sparkContext
+    /**
+     * The bipartite terms by document graph.
+     */
+    graph = {
+      // To setup a bipartite graph it is necessary to ensure that the document and
+      // word ids are in a different namespace
+      val renumbered = tokens.map({ case (wordId, docId) =>
+        assert(wordId >= 0)
+        assert(docId >= 0)
+        val newDocId: LDA.DocId = -(docId + 1L)
+        (wordId, newDocId)
+      })
+      val nT = nTopics
+      // Sample the tokens
+      val gTmp = Graph.fromEdgeTuples(renumbered, false).mapEdges({ (pid, iter) =>
+          val gen = new java.util.Random(pid)
+          iter.map(e => LDA.combineTopics(gen.nextInt(nT), 0))
+      })
+      // Compute the topic histograms (factors) for each word and document
+      val newCounts = gTmp.mapReduceTriplets[LDA.Counts](
+        e => Iterator((e.srcId, LDA.makeCountsFromTopic(nT, e.attr)), (e.dstId, LDA.makeCountsFromTopic(nT, e.attr))),
+        (a, b) => LDA.combineCounts(a,b)
+      )
+      // Update the graph with the factors
+      gTmp.outerJoinVertices(newCounts)({(vid, _, newFactorOpt) => LDA.makeHistogramFromCounts(newFactorOpt.get, vid) }).cache()
+    }
+    nWords = wordVertices.count()
+    nDocs = docVertices.count()
+    nTokens = graph.edges.count()
+    /**
+     * The total counts for each topic
+     */
+    totalHistogram = LDA.makeHistogramFromCounts(graph.edges.map(e => e.attr)
+      .aggregate(new LDA.Counts(nTopics))(LDA.combineTopicIntoCounts, LDA.combineCounts), LDA.IndexFalse)
+    logInfo("LDA setup finished")
+    timer.stop("setup")
+    modelIsSetup = true
+  }
 
   /**
    * Trains the model by iterating nIter times
    * @param iterations Number of iterations to execute
    */
-  def train(iterations: Int) {
+  def train(iterations: Int): Unit = {
+    if (!modelIsSetup) {
+      setup()
+    }
     // Run the sampling
     timer.start("run")
     logInfo("Starting LDA Iterations...")
@@ -421,7 +470,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       }
       // Broadcast the topic histogram
 
-      val totalHistogramBroadcast = sc.broadcast(totalHistogram)
+
 
       // Shadowing because scala's closure capture would otherwise serialize the model object
       val a = alpha
@@ -429,14 +478,19 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       val nt = nTopics
       val nw = nWords
 
+      val totalHistogramBroadcast = sc.broadcast(totalHistogram)
+      val totalNormSum = totalHistogram.counts.map(c => math.pow(1 / (c + nw * beta), 3)).sum
+      val totalNormSumBroadcast = sc.broadcast(totalNormSum)
+
       // Re-sample all the tokens
       var tempTimer: Long = System.nanoTime()
       val parts = graph.edges.partitions.size
       val interIter = internalIteration
-      graph = graph.mapTriplets({(pid: PartitionID, iter: Iterator[EdgeTriplet[Histogram, Topic]]) =>
+      graph = graph.mapTriplets({(pid: PartitionID, iter: Iterator[EdgeTriplet[LDA.Histogram, LDA.Topic]]) =>
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
-          LDA.sampleToken(gen, token, totalHistogramBroadcast, nt, a, b, nw)
+          val topic = LDA.fastSampleToken(gen, token, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          topic
         })
       }, TripletFields.All)
       if (loggingTime && i % loggingInterval == 0) {
@@ -455,7 +509,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
             val topic = e.attr
             val old = LDA.oldTopic(topic)
             val current = LDA.currentTopic(topic)
-            var result: Iterator[(VertexId, Topic)] = Iterator.empty
+            var result: Iterator[(VertexId, LDA.Topic)] = Iterator.empty
             if (old != current) {
               result = Iterator((e.srcId, e.attr), (e.dstId, e.attr))
             }
@@ -466,10 +520,10 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       graph = graph.outerJoinVertices(deltas)({(vid, oldHistogram, vertexDeltasOption) =>
         if (vertexDeltasOption.isDefined) {
           val vertexDeltas = vertexDeltasOption.get
-          val counts = (oldHistogram.counts, vertexDeltas).zipped.map(_ + _)
-          makeHistogramFromCounts(counts, vid)
+          //makeHistogramFromCounts(oldHistogram.counts.zip(vertexDeltas).map({case (v, d) => v + d}), vid)
+          LDA.applyDeltasToHistogram(oldHistogram, vertexDeltas)
         } else {
-          makeHistogramFromCounts(oldHistogram.counts, vid)
+          LDA.Histogram(oldHistogram.counts, oldHistogram.index)
         }
       }).cache()
 
@@ -481,8 +535,8 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
 
       // Recompute the global counts (the actual action)
       tempTimer = System.nanoTime()
-      totalHistogram = makeHistogramFromCounts(graph.edges.map(e => e.attr)
-        .aggregate(new Array[Int](nt))(LDA.combineTopicIntoCounts, LDA.combineCounts), DocIdValue)
+      totalHistogram = LDA.makeHistogramFromCounts(graph.edges.map(e => e.attr)
+        .aggregate(new Array[Int](nt))(LDA.combineTopicIntoCounts, LDA.combineCounts), LDA.IndexFalse)
       assert(totalHistogram.counts.sum == nTokens)
       if (loggingTime && i % loggingInterval == 0) {
         globalCountsTimes += System.nanoTime() - tempTimer
@@ -504,16 +558,16 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    * @param k Number of top words to output
    * @return object with top counts for each word.
    */
-  def topWords(k:Int): Array[Array[(Int, WordId)]] = {
+  def topWords(k:Int): Array[Array[(Int, LDA.WordId)]] = {
     val nt = nTopics
     graph.vertices.filter({
       case (vid, c) => vid >= 0
     }).mapPartitions({ items =>
-      val queues = Array.fill(nt)(new BoundedPriorityQueue[(Int, WordId)](k))
+      val queues = Array.fill(nt)(new BoundedPriorityQueue[(Int, LDA.WordId)](k))
       for ((wordId, factor) <- items) {
         var t = 0
         while (t < nt) {
-          val tpl: (Int, WordId) = (factor.counts(t), wordId)
+          val tpl: (Int, LDA.WordId) = (factor.counts(t), wordId)
           queues(t) += tpl
           t += 1
         }
@@ -529,7 +583,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
    * Creates the posterior distribution for sampling from the vertices
    * @return Posterior distribution
    */
-  def posterior: Posterior = {
+  def posterior: LDA.Posterior = {
     graph.cache()
     val words = graph.vertices.filter({ case (vid, _) => vid >= 0 })
     val docs =  graph.vertices.filter({ case (vid,_) => vid < 0 })

@@ -233,7 +233,7 @@ object LDA {
 
   /**
    * Re-samples the given token/triplet to a new topic
-   * @param gen Random number generator
+   * @param randomDouble Random number generator
    * @param triplet Token to re-sample
    * @param totalHistogram roadcast Total histogram of topics
    * @param nt Number of topics
@@ -242,7 +242,7 @@ object LDA {
    * @param nw Number of words in corpus
    * @return New topic for token/triplet
    */
-  def sampleToken(gen: java.util.Random,
+  def sampleToken(randomDouble: Double,
                   triplet: EdgeTriplet[Histogram, Topic],
                   totalHistogram: Histogram,
                   totalNorm: Double,
@@ -272,7 +272,7 @@ object LDA {
     }
     assert(conditionalSum > 0.0)
     // Generate a random number between [0, conditionalSum)
-    val u = gen.nextDouble() * conditionalSum
+    val u = randomDouble * conditionalSum
     assert(u < conditionalSum)
     // Draw the new topic from the multinomial
     var newTopic = 0
@@ -292,7 +292,7 @@ object LDA {
     }
   }
 
-  def fastSampleToken(gen: java.util.Random,
+  def fastSampleToken(randomDouble: Double,
                       triplet: EdgeTriplet[Histogram, Topic],
                       totalHistogram: Histogram,
                       totalNorm: Double,
@@ -309,23 +309,24 @@ object LDA {
     var bSquareSum: Double = 0
     var cSquareSum: Double = totalNorm
     cSquareSum -= math.pow(1 / (cCounts(topic) + nw * beta), 3)
-    cSquareSum += math.pow(1 / (cCounts(topic) - 1 + nw * beta), 3)
+    cSquareSum += math.pow(1 / (countWithoutTopic(cCounts, topic, topic) + nw * beta), 3)
     for (i <- 0 until nt) {
       aSquareSum += math.pow(countWithoutTopic(aCounts, i, topic) + alpha, 3)
       bSquareSum += math.pow(countWithoutTopic(bCounts, i, topic) + alpha, 3)
     }
+    println(s"ACube:$aSquareSum BCube:$bSquareSum CCube:$cSquareSum")
     val zBound = new Array[Double](nt)
     val sumP = new Array[Double](nt)
-    var u = gen.nextDouble()
     val oneThird = 1D / 3D
+    var u = randomDouble
     var i = 0
     while (i < nt) {
       val k = topicOrder(i)
       val a = countWithoutTopic(aCounts, k, topic) + alpha
       val b = countWithoutTopic(bCounts, k, topic) + beta
       val c = 1D / (countWithoutTopic(cCounts, k, topic) + beta * nw)
-      val priorSumP = if (i == 0) 0 else sumP(i - 1)
-      sumP(i) = priorSumP + a * b * c
+      sumP(i) = if (i == 0) 0 else sumP(i - 1)
+      sumP(i) += a * b * c
       val aSubtractTerm = math.pow(a, 3)
       val bSubtractTerm = math.pow(b, 3)
       val cSubtractTerm = math.pow(c, 3)
@@ -335,13 +336,15 @@ object LDA {
       val norm = math.pow(aSquareSum * bSquareSum * cSquareSum, oneThird)
       zBound(i) = sumP(i) + norm
       if (u * zBound(i) <= sumP(i)) {
-        if (i == 0 || u * zBound(i) > priorSumP) {
+        if (i == 0 || u * zBound(i) > sumP(i - 1)) {
+          //println("# sampled topics:" + i)
           return LDA.combineTopics(k, topic)
         } else {
-          u = (u * zBound(i - 1) - priorSumP) * zBound(i) / (zBound(i - 1) - zBound(i))
+          u = (u * zBound(i - 1) - sumP(i - 1)) * zBound(i) / (zBound(i - 1) - zBound(i))
           var t = 0
           while (t < i) {
             if (sumP(t) >= u) {
+              //println("# sampled topics:" + t)
               return LDA.combineTopics(topicOrder(t), topic)
             }
             t += 1
@@ -374,8 +377,8 @@ object LDA {
  */
 class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
           val nTopics: Int = 100,
-          val alpha: Double = 0.1,
-          val beta: Double = 0.1,
+          val alpha: Double = 0.01,
+          val beta: Double = 0.01,
           val loggingInterval: Int = 0,
           val loggingLikelihood: Boolean = false,
           val loggingTime: Boolean = false) extends Serializable with Logging {
@@ -490,8 +493,13 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       graph = graph.mapTriplets({(pid: PartitionID, iter: Iterator[EdgeTriplet[LDA.Histogram, LDA.Topic]]) =>
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
-          val topic = LDA.fastSampleToken(gen, token, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
-          topic
+          val u = gen.nextDouble()
+          val s1 = LDA.sampleToken(u, token, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          val s2 = LDA.fastSampleToken(u, token, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          println(s"sample:${LDA.currentTopic(s1)} fast:${LDA.currentTopic(s2)}")
+          assert(LDA.currentTopic(s1) == LDA.currentTopic(s2))
+          assert(s1 == s2)
+          s1
         })
       }, TripletFields.All)
       if (loggingTime && i % loggingInterval == 0) {
@@ -522,7 +530,8 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         if (vertexDeltasOption.isDefined) {
           val vertexDeltas = vertexDeltasOption.get
           //makeHistogramFromCounts(oldHistogram.counts.zip(vertexDeltas).map({case (v, d) => v + d}), vid)
-          LDA.applyDeltasToHistogram(oldHistogram, vertexDeltas)
+          val histogram = LDA.applyDeltasToHistogram(oldHistogram, vertexDeltas)
+          histogram
         } else {
           LDA.Histogram(oldHistogram.counts, oldHistogram.index)
         }

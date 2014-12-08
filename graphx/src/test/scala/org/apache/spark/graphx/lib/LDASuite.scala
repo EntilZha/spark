@@ -55,7 +55,7 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
       val tokens = lines.flatMap(line => line.split(" "))
       val (vocab, vocabLookup) = LDA.extractVocab(tokens)
       val edges = LDA.edgesFromTextDocLines(lines, vocab, vocabLookup)
-      val model = new LDA(edges, nTopics=2)
+      val model = new LDA(edges, nTopics=2, alpha=0.1, beta=0.1)
       model.train(20)
       val topWords = model.topWords(2)
       val t1w1 = vocab(topWords(0)(0)._2.toInt)
@@ -158,6 +158,13 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
     val argsort = histogram.index.get.argsort
     val argsortExpect = Array(0, 1, 2)
     argsort should equal (argsortExpect)
+  }
+  test("Count without current topic returns adjusted values") {
+    val a = Array(3, 1, 5, 4)
+    for (i <- 0 until a.length) {
+      LDA.countWithoutTopic(a, i, -1) should equal (a(i))
+      LDA.countWithoutTopic(a, i, i) should equal (a(i) - 1)
+    }
   }
 //  test("Benchmark LDA.sampleToken") {
 //    val nTopics = 100

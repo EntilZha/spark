@@ -318,7 +318,8 @@ object LDA {
     val sumP = new Array[Double](nt)
     var u = gen.nextDouble()
     val oneThird = 1D / 3D
-    for (i <- 0 until nt) {
+    var i = 0
+    while (i < nt) {
       val k = topicOrder(i)
       val a = countWithoutTopic(aCounts, k, topic) + alpha
       val b = countWithoutTopic(bCounts, k, topic) + beta
@@ -328,9 +329,9 @@ object LDA {
       val aSubtractTerm = math.pow(a, 3)
       val bSubtractTerm = math.pow(b, 3)
       val cSubtractTerm = math.pow(c, 3)
-      aSquareSum = if (aSquareSum - aSubtractTerm > 0) aSquareSum - aSubtractTerm else 0
-      bSquareSum = if (bSquareSum - bSubtractTerm > 0) bSquareSum - bSubtractTerm else 0
-      cSquareSum = if (cSquareSum - cSubtractTerm > 0) cSquareSum - cSubtractTerm else 0
+      aSquareSum = math.max(aSquareSum - aSubtractTerm, 0)
+      bSquareSum = math.max(bSquareSum - bSubtractTerm, 0)
+      cSquareSum = math.max(cSquareSum - cSubtractTerm, 0)
       val norm = math.pow(aSquareSum * bSquareSum * cSquareSum, oneThird)
       zBound(i) = sumP(i) + norm
       if (u * zBound(i) <= sumP(i)) {
@@ -338,13 +339,16 @@ object LDA {
           return LDA.combineTopics(k, topic)
         } else {
           u = (u * zBound(i - 1) - priorSumP) * zBound(i) / (zBound(i - 1) - zBound(i))
-          for (t <- 0 until i) {
+          var t = 0
+          while (t < i) {
             if (sumP(t) >= u) {
               return LDA.combineTopics(topicOrder(t), topic)
             }
+            t += 1
           }
         }
       }
+      i += 1
     }
     throw new Exception("fast sample token failed")
   }
@@ -468,16 +472,13 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         val likelihood = logLikelihood()
         likelihoods += likelihood
       }
-      // Broadcast the topic histogram
-
-
-
       // Shadowing because scala's closure capture would otherwise serialize the model object
       val a = alpha
       val b = beta
       val nt = nTopics
       val nw = nWords
 
+      // Broadcast the topic histogram
       val totalHistogramBroadcast = sc.broadcast(totalHistogram)
       val totalNormSum = totalHistogram.counts.map(c => math.pow(1 / (c + nw * beta), 3)).sum
       val totalNormSumBroadcast = sc.broadcast(totalNormSum)

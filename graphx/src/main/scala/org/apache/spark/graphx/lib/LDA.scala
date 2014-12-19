@@ -45,7 +45,7 @@ object LDA {
    */
   type Topic = Long
 
-  case class Histogram(counts:Counts, index:Option[Index]) extends Serializable
+  case class Histogram(counts:Counts, index:Option[Index], normSum:Double) extends Serializable
   type Counts = Array[Int]
   /**
    * Index holds two arrays which contain:
@@ -101,37 +101,48 @@ object LDA {
   }
 
   /**
-   * Apply the deltas from a prior iteration to the histogram. Operation
-   * is in place, and maintains the argsort. It is assumed that the deltas
-   * are small enough to make the bubblesort used fast. Additionally, does not
-   * mutate oldHistogram
+   * Creates a new histogram then applies the deltas in place to maintain the
+   * argsort order. I is assumed that deltas are sparse so that
+   * the bubblesort used fast.
    * @param oldHistogram
    * @param deltas
    * @return
    */
-  def applyDeltasToHistogram(oldHistogram:Histogram, deltas:Array[Int]): Histogram = {
+  def applyDeltasToHistogram(oldHistogram:Histogram, deltas:Array[Int], parameter:Double): Histogram = {
     if (oldHistogram.index.isEmpty) {
       val counts = oldHistogram.counts.zip(deltas).map({case (v, d) => v + d})
-      makeHistogramFromCounts(counts, IndexFalse)
+      makeHistogramFromCounts(counts, IndexFalse, parameter)
     } else {
       val index = Index(oldHistogram.index.get.argsort.clone(), oldHistogram.index.get.lookup.clone())
-      val histogram = Histogram(oldHistogram.counts.clone(), Option(index))
-      val counts = histogram.counts
-      val argsort = index.argsort
+      var normSum = oldHistogram.normSum
+      val counts = oldHistogram.counts.clone()
       for (k <- 0 until deltas.length) {
         if (deltas(k) != 0) {
-          applyDeltaToHistogram(histogram, k, deltas(k))
+          normSum = applyDeltaToHistogram(counts, index, normSum, k, deltas(k), parameter)
         }
       }
-      histogram
+      Histogram(counts, Option(index), normSum)
     }
   }
-  def applyDeltaToHistogram(oldHistogram:Histogram, topic:Int, delta:Int): Unit = {
-    val counts = oldHistogram.counts
-    val index = oldHistogram.index.get
+
+  /**
+   * Applies the deltas to the histogram, then returns the new normSum with the
+   * topic changes.
+   * @param counts
+   * @param index
+   * @param oldNormSum
+   * @param topic
+   * @param delta
+   * @param parameter
+   * @return
+   */
+  def applyDeltaToHistogram(counts:Counts, index:Index, oldNormSum:Double, topic:Int, delta:Int, parameter:Double): Double = {
     val argsort = index.argsort
     val lookup = index.lookup
+    var normSum = oldNormSum
+    normSum -= math.pow(counts(topic) + parameter, 3)
     counts(topic) += delta
+    normSum += math.pow(counts(topic) + parameter, 3)
     val c = counts(topic)
     var i = lookup(topic)
     if (delta > 0) {
@@ -155,6 +166,7 @@ object LDA {
         i += 1
       }
     }
+    normSum
   }
 
   /**
@@ -174,9 +186,10 @@ object LDA {
    * object.
    * @param counts
    * @param vid
+   * @param parameter Parameter for computing norm sum, either alpha or beta
    * @return
    */
-  def makeHistogramFromCounts(counts:Counts, vid:VertexId): Histogram = {
+  def makeHistogramFromCounts(counts:Counts, vid:VertexId, parameter:Double): Histogram = {
     if (vid < 0) {
       val argsort = breeze.linalg.argsort(new DenseVector(counts)).toArray.reverse
       val lookup = new Array[Int](counts.length)
@@ -185,9 +198,9 @@ object LDA {
         lookup(topic) = i
       }
       val index = Index(argsort, lookup)
-      Histogram(counts, Option(index))
+      Histogram(counts, Option(index), LDA.computeNormSum(counts, parameter))
     } else {
-      Histogram(counts, Option.empty)
+      Histogram(counts, Option.empty, LDA.computeNormSum(counts, parameter))
     }
   }
 
@@ -231,6 +244,19 @@ object LDA {
     edges
   }
 
+  def computeNormSum(counts:Counts, parameter:Double):Double = {
+    var normSum:Double = 0
+    if (parameter < 0) {
+      return 0
+    }
+    var i = 0
+    while (i < counts.length) {
+      normSum += math.pow(counts(i) + parameter, 3)
+      i += 1
+    }
+    normSum
+  }
+
   /**
    * Re-samples the given token/triplet to a new topic
    * @param randomDouble Random number generator
@@ -251,7 +277,6 @@ object LDA {
                   alpha: Double,
                   beta: Double,
                   nw: Long): Topic = {
-    println("NORMAL LDA")
     val totalCounts = totalHistogram.counts
     val wHist = wordHistogram.counts
     val dHist = docHistogram.counts
@@ -269,7 +294,6 @@ object LDA {
       val d = dHist(t) - cavityOffset
       val total = totalCounts(t) - cavityOffset
       conditional(t) = (alpha + d) * (beta + w) / (beta * nw + total)
-      println(s"Coefficients: a=${alpha + d} b=${beta + w} c=${1/(beta * nw + total)} a*b*c=${conditional(t)}")
       conditionalSum += conditional(t)
       t += 1
     }
@@ -284,8 +308,6 @@ object LDA {
       newTopic += 1
       cumsum += conditional(newTopic)
     }
-    println(s"u: $randomDouble u*sum:${u} sum:$cumsum")
-    println(conditional.mkString(","))
     LDA.combineTopics(newTopic, oldTopic)
   }
 
@@ -297,6 +319,27 @@ object LDA {
     }
   }
 
+  /**
+   * This is a fast approximation to the square root used in the core Gibbs Sampling
+   * step of LDA. Inspiration comes from acbrt1 from here:
+   * http://www.hackersdelight.org/hdcodetxt/acbrt.c.txt
+   * @param xVal
+   * @return
+   */
+  @inline
+  def cubeRoot(xVal:Double): Double = {
+    val x0: Float = xVal.toFloat
+    var x: Float = x0
+    var ix: Int = java.lang.Float.floatToRawIntBits(x)
+    ix = ix / 4 + ix / 16
+    ix += + ix / 16
+    ix += ix / 256
+    ix += 0x2a5137a0
+    x = java.lang.Float.intBitsToFloat(ix)
+    x = 0.33333333F * (2.0F * x + x0 / (x * x))
+    x.toDouble
+  }
+  @inline
   def fastSampleToken(randomDouble: Double,
                       topic: Topic,
                       docHistogram: Histogram,
@@ -307,59 +350,77 @@ object LDA {
                       alpha: Double,
                       beta: Double,
                       nw: Long): Topic = {
-    println("FAST LDA")
+    var t1 = System.nanoTime()
     val currentTopic = LDA.currentTopic(topic)
     val topicOrder = docHistogram.index.get.argsort
     val aCounts = docHistogram.counts
     val bCounts = wordHistogram.counts
     val cCounts = totalHistogram.counts
-    var aSquareSum: Double = 0
-    var bSquareSum: Double = 0
+    var aSquareSum: Double = docHistogram.normSum
+    var bSquareSum: Double = wordHistogram.normSum
     var cSquareSum: Double = totalNorm
+    aSquareSum -= math.pow(aCounts(currentTopic) + alpha, 3)
+    aSquareSum += math.pow(cCounts(currentTopic) - 1 + alpha, 3)
+    bSquareSum -= math.pow(bCounts(currentTopic) + beta, 3)
+    bSquareSum += math.pow(bCounts(currentTopic) - 1 + beta, 3)
     cSquareSum -= math.pow(1 / (cCounts(currentTopic) + nw * beta), 3)
-    cSquareSum += math.pow(1 / (countWithoutTopic(cCounts, currentTopic, currentTopic) + nw * beta), 3)
+    cSquareSum += math.pow(1 / (cCounts(currentTopic) - 1 + nw * beta), 3)
     assert(cSquareSum >= 0)
-    assert(LDA.isArgSorted(bCounts, topicOrder))
-    for (i <- 0 until nt) {
-      aSquareSum += math.pow(countWithoutTopic(aCounts, i, currentTopic) + alpha, 3)
-      bSquareSum += math.pow(countWithoutTopic(bCounts, i, currentTopic) + beta, 3)
-    }
     val zBound = new Array[Double](nt)
     val sumP = new Array[Double](nt)
-    val oneThird = 1D / 3D
     var u = randomDouble
     var i = 0
-    println(s"aSum=$aSquareSum bSum=$bSquareSum cSum=$cSquareSum")
+    var k = 0
+    var a:Double = 0
+    var b:Double = 0
+    var c:Double = 0
+    var s2 = 0L
+    var t2 = 0L
+    var s3 = 0L
+    var t3 = 0L
+    var t = 0
+    var t4 = 0L
+    var s4 = 0L
+    var offset: Int = 0
     while (i < nt) {
-      val k = topicOrder(i)
-      val a = countWithoutTopic(aCounts, k, currentTopic) + alpha
-      val b = countWithoutTopic(bCounts, k, currentTopic) + beta
-      val c = 1D / (countWithoutTopic(cCounts, k, currentTopic) + beta * nw)
-      println(s"Coefficients: a=$a b=$b c=$c a*b*c=${a*b*c}")
+      t3 = System.nanoTime()
+      k = topicOrder(i)
+      offset = if (k == currentTopic) 1 else 0
+      a = aCounts(k) - offset + alpha
+      b = bCounts(k) - offset + beta
+      t4 = System.nanoTime()
+      c = 1D / (cCounts(k) - offset + beta * nw)
+      s4 += System.nanoTime() - t4
       sumP(i) = if (i == 0) 0 else sumP(i - 1)
       sumP(i) += a * b * c
-      aSquareSum = math.max(aSquareSum - math.pow(a, 3), 0)
-      bSquareSum = math.max(bSquareSum - math.pow(b, 3), 0)
-      cSquareSum = math.max(cSquareSum - math.pow(c, 3), 0)
-      zBound(i) = sumP(i) + math.pow(aSquareSum * bSquareSum * cSquareSum, oneThird)
+      aSquareSum = math.max(aSquareSum - a * a * a, 0)
+      bSquareSum = math.max(bSquareSum - b * b * b, 0)
+      cSquareSum = math.max(cSquareSum - c * c * c, 0)
+      s3 += System.nanoTime() - t3
+      t2 = System.nanoTime()
+      zBound(i) = sumP(i) + LDA.cubeRoot(aSquareSum * bSquareSum * cSquareSum)
+      s2 += System.nanoTime() - t2
       if (sumP(i) >= u * zBound(i) ) {
         if (i == 0 || u * zBound(i) > sumP(i - 1)) {
-          println(s"u:$u z:${zBound(i)} u*z:${u*zBound(i)} sumP:${sumP(i)}")
-          println("zBounds:" + zBound.mkString(","))
-          println("sumP:" + sumP.mkString(","))
+          println(s"total: ${System.nanoTime() - t1}")
+          println(s"root: $s2")
+          println(s"other: $s3")
+          println(s"inverse: $s4")
           return LDA.combineTopics(k, currentTopic)
         } else {
           u = (u * zBound(i - 1) - sumP(i - 1)) * zBound(i) / (zBound(i - 1) - zBound(i))
-          var t = 0
+          t = 0
           while (t < i) {
             if (sumP(t) >= u) {
-              println("returned second")
+              println(s"total: ${System.nanoTime() - t1}")
+              println(s"root: $s2")
+              println(s"other: $s3")
+              println(s"inverse: $s4")
               return LDA.combineTopics(topicOrder(t), currentTopic)
             }
             t += 1
           }
         }
-        assert(false)
       }
       i += 1
     }
@@ -440,6 +501,8 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         (wordId, newDocId)
       })
       val nT = nTopics
+      val a = alpha
+      val b = beta
       // Sample the tokens
       val gTmp = Graph.fromEdgeTuples(renumbered, false).mapEdges({ (pid, iter) =>
           val gen = new java.util.Random(pid)
@@ -451,7 +514,10 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         (a, b) => LDA.combineCounts(a,b)
       )
       // Update the graph with the factors
-      gTmp.outerJoinVertices(newCounts)({(vid, _, newFactorOpt) => LDA.makeHistogramFromCounts(newFactorOpt.get, vid) }).cache()
+      gTmp.outerJoinVertices(newCounts)({(vid, _, newFactorOpt) =>
+        val parameter = if (vid < 0) a else b
+        LDA.makeHistogramFromCounts(newFactorOpt.get, vid, parameter)
+      }).cache()
     }
     nWords = wordVertices.count()
     nDocs = docVertices.count()
@@ -459,8 +525,9 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     /**
      * The total counts for each topic
      */
+    val counts = graph.edges.map(e => e.attr).aggregate(new LDA.Counts(nTopics))(LDA.combineTopicIntoCounts, LDA.combineCounts)
     totalHistogram = LDA.makeHistogramFromCounts(graph.edges.map(e => e.attr)
-      .aggregate(new LDA.Counts(nTopics))(LDA.combineTopicIntoCounts, LDA.combineCounts), LDA.IndexFalse)
+      .aggregate(new LDA.Counts(nTopics))(LDA.combineTopicIntoCounts, LDA.combineCounts), LDA.IndexFalse, -1)
     logInfo("LDA setup finished")
     timer.stop("setup")
     modelIsSetup = true
@@ -504,12 +571,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
           val u = gen.nextDouble()
-          val s1 = LDA.sampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
-          val s2 = LDA.fastSampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
-          println(s"sample:${LDA.currentTopic(s1)} fast:${LDA.currentTopic(s2)}")
-          assert(LDA.currentTopic(s1) == LDA.currentTopic(s2))
-          assert(s1 == s2)
-          s1
+          LDA.fastSampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
         })
       }, TripletFields.All)
       if (loggingTime && i % loggingInterval == 0) {
@@ -539,11 +601,11 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       graph = graph.outerJoinVertices(deltas)({(vid, oldHistogram, vertexDeltasOption) =>
         if (vertexDeltasOption.isDefined) {
           val vertexDeltas = vertexDeltasOption.get
-          //makeHistogramFromCounts(oldHistogram.counts.zip(vertexDeltas).map({case (v, d) => v + d}), vid)
-          val histogram = LDA.applyDeltasToHistogram(oldHistogram, vertexDeltas)
+          val parameter = if (vid < 0) a else b
+          val histogram = LDA.applyDeltasToHistogram(oldHistogram, vertexDeltas, parameter)
           histogram
         } else {
-          LDA.Histogram(oldHistogram.counts, oldHistogram.index)
+          LDA.Histogram(oldHistogram.counts, oldHistogram.index, oldHistogram.normSum)
         }
       }).cache()
 
@@ -556,7 +618,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       // Recompute the global counts (the actual action)
       tempTimer = System.nanoTime()
       totalHistogram = LDA.makeHistogramFromCounts(graph.edges.map(e => e.attr)
-        .aggregate(new Array[Int](nt))(LDA.combineTopicIntoCounts, LDA.combineCounts), LDA.IndexFalse)
+        .aggregate(new Array[Int](nt))(LDA.combineTopicIntoCounts, LDA.combineCounts), LDA.IndexFalse, -1)
       assert(totalHistogram.counts.sum == nTokens)
       if (loggingTime && i % loggingInterval == 0) {
         globalCountsTimes += System.nanoTime() - tempTimer

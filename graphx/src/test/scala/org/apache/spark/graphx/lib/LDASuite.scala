@@ -147,14 +147,14 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
     val argsort = Array(4, 2, 0, 1, 3)
     val deltas = Array(-1, -1, 2, 10, -6)
     val argsortExpect = Array(3, 2, 0, 1, 4)
-    val histogram = LDA.makeHistogramFromCounts(a, LDA.IndexTrue)
-    val result = LDA.applyDeltasToHistogram(histogram, deltas)
+    val histogram = LDA.makeHistogramFromCounts(a, LDA.IndexTrue, -1)
+    val result = LDA.applyDeltasToHistogram(histogram, deltas, -1)
     result.index.get.argsort should equal (argsortExpect)
   }
   test("Maintain single argsort with single delta") {
     val a = Array(2, 3, 1)
-    val histogram = LDA.makeHistogramFromCounts(a, LDA.IndexTrue)
-    LDA.applyDeltaToHistogram(histogram, 0, 2)
+    val histogram = LDA.makeHistogramFromCounts(a, LDA.IndexTrue, -1)
+    LDA.applyDeltaToHistogram(histogram.counts, histogram.index.get, histogram.normSum, 0, 2, -1)
     val argsort = histogram.index.get.argsort
     val argsortExpect = Array(0, 1, 2)
     argsort should equal (argsortExpect)
@@ -165,6 +165,13 @@ class LDASuite extends FunSuite with LocalSparkContext with Matchers {
       LDA.countWithoutTopic(a, i, -1) should equal (a(i))
       LDA.countWithoutTopic(a, i, i) should equal (a(i) - 1)
     }
+  }
+  test("Newton's cube root approximation") {
+    val a:Double = .1
+    val aRoot = LDA.cubeRoot(a)
+    val mathRoot = math.cbrt(a)
+    val relativeError = aRoot / mathRoot - 1
+    math.abs(relativeError) < 0.00103 should equal (true)
   }
 //  test("Benchmark LDA.sampleToken") {
 //    val nTopics = 100

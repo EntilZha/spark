@@ -326,7 +326,6 @@ object LDA {
    * @param xVal
    * @return
    */
-  @inline
   def cubeRoot(xVal:Double): Double = {
     val x0: Float = xVal.toFloat
     var x: Float = x0
@@ -339,7 +338,6 @@ object LDA {
     x = 0.33333333F * (2.0F * x + x0 / (x * x))
     x.toDouble
   }
-  @inline
   def fastSampleToken(randomDouble: Double,
                       topic: Topic,
                       docHistogram: Histogram,
@@ -359,6 +357,7 @@ object LDA {
     var aSquareSum: Double = docHistogram.normSum
     var bSquareSum: Double = wordHistogram.normSum
     var cSquareSum: Double = totalNorm
+    var bits: Long = 0
     aSquareSum -= math.pow(aCounts(currentTopic) + alpha, 3)
     aSquareSum += math.pow(cCounts(currentTopic) - 1 + alpha, 3)
     bSquareSum -= math.pow(bCounts(currentTopic) + beta, 3)
@@ -367,7 +366,7 @@ object LDA {
     cSquareSum += math.pow(1 / (cCounts(currentTopic) - 1 + nw * beta), 3)
     assert(cSquareSum >= 0)
     val zBound = new Array[Double](nt)
-    val sumP = new Array[Double](nt)
+    val sumP = new Array[Double](nt + 1)
     var u = randomDouble
     var i = 0
     var k = 0
@@ -378,44 +377,50 @@ object LDA {
     var t2 = 0L
     var s3 = 0L
     var t3 = 0L
-    var t = 0
     var t4 = 0L
     var s4 = 0L
+    var t5 = 0L
+    var t = 0
     var offset: Int = 0
+    println(s"start: ${System.nanoTime() - t1}")
     while (i < nt) {
-      t3 = System.nanoTime()
+      t2 = System.nanoTime()
       k = topicOrder(i)
-      offset = if (k == currentTopic) 1 else 0
+      offset = (k == currentTopic).compare(true)
       a = aCounts(k) - offset + alpha
       b = bCounts(k) - offset + beta
-      t4 = System.nanoTime()
       c = 1D / (cCounts(k) - offset + beta * nw)
-      s4 += System.nanoTime() - t4
-      sumP(i) = if (i == 0) 0 else sumP(i - 1)
-      sumP(i) += a * b * c
-      aSquareSum = math.max(aSquareSum - a * a * a, 0)
-      bSquareSum = math.max(bSquareSum - b * b * b, 0)
-      cSquareSum = math.max(cSquareSum - c * c * c, 0)
-      s3 += System.nanoTime() - t3
-      t2 = System.nanoTime()
-      zBound(i) = sumP(i) + LDA.cubeRoot(aSquareSum * bSquareSum * cSquareSum)
+      sumP(i + 1) = sumP(i)
+      sumP(i + 1) += a * b * c
       s2 += System.nanoTime() - t2
-      if (sumP(i) >= u * zBound(i) ) {
-        if (i == 0 || u * zBound(i) > sumP(i - 1)) {
-          println(s"total: ${System.nanoTime() - t1}")
-          println(s"root: $s2")
-          println(s"other: $s3")
-          println(s"inverse: $s4")
+      t3 = System.nanoTime()
+      bits = java.lang.Double.doubleToRawLongBits(aSquareSum - a * a * a)
+      aSquareSum = java.lang.Double.longBitsToDouble(~(bits >> 63) & bits)
+      bits = java.lang.Double.doubleToRawLongBits(bSquareSum - b * b * b)
+      bSquareSum = java.lang.Double.longBitsToDouble(~(bits >> 63) & bits)
+      bits = java.lang.Double.doubleToRawLongBits(cSquareSum - c * c * c)
+      cSquareSum = java.lang.Double.longBitsToDouble(~(bits >> 63) & bits)
+      s3 += System.nanoTime() - t3
+      t4 = System.nanoTime()
+      zBound(i) = sumP(i + 1) + LDA.cubeRoot(aSquareSum * bSquareSum * cSquareSum)
+      s4 += System.nanoTime() - t4
+      t5 = System.nanoTime()
+      if (sumP(i + 1) >= u * zBound(i) ) {
+        if (i == 0 || u * zBound(i) > sumP(i)) {
+          println(s"math: $s2")
+          println(s"bit twiddle: $s3")
+          println(s"root: $s4")
+          println(s"return: ${System.nanoTime() - t5}")
           return LDA.combineTopics(k, currentTopic)
         } else {
-          u = (u * zBound(i - 1) - sumP(i - 1)) * zBound(i) / (zBound(i - 1) - zBound(i))
+          u = (u * zBound(i - 1) - sumP(i)) * zBound(i) / (zBound(i - 1) - zBound(i))
           t = 0
           while (t < i) {
-            if (sumP(t) >= u) {
-              println(s"total: ${System.nanoTime() - t1}")
-              println(s"root: $s2")
-              println(s"other: $s3")
-              println(s"inverse: $s4")
+            if (sumP(t + 1) >= u) {
+              println(s"math: $s2")
+              println(s"bit twiddle: $s3")
+              println(s"root: $s4")
+              println(s"return: ${System.nanoTime() - t5}")
               return LDA.combineTopics(topicOrder(t), currentTopic)
             }
             t += 1
@@ -571,7 +576,11 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
           val u = gen.nextDouble()
-          LDA.fastSampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          if (i < 4) {
+            LDA.sampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          } else {
+            LDA.fastSampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          }
         })
       }, TripletFields.All)
       if (loggingTime && i % loggingInterval == 0) {

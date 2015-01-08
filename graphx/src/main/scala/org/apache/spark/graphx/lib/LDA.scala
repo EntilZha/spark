@@ -382,7 +382,7 @@ object LDA {
     var t5 = 0L
     var t = 0
     var offset: Int = 0
-    println(s"start: ${System.nanoTime() - t1}")
+    //println(s"start: ${System.nanoTime() - t1}")
     while (i < nt) {
       t2 = System.nanoTime()
       k = topicOrder(i)
@@ -407,20 +407,20 @@ object LDA {
       t5 = System.nanoTime()
       if (sumP(i + 1) >= u * zBound(i) ) {
         if (i == 0 || u * zBound(i) > sumP(i)) {
-          println(s"math: $s2")
-          println(s"bit twiddle: $s3")
-          println(s"root: $s4")
-          println(s"return: ${System.nanoTime() - t5}")
+          //println(s"math: $s2")
+          //println(s"bit twiddle: $s3")
+          //println(s"root: $s4")
+          //println(s"return: ${System.nanoTime() - t5}")
           return LDA.combineTopics(k, currentTopic)
         } else {
           u = (u * zBound(i - 1) - sumP(i)) * zBound(i) / (zBound(i - 1) - zBound(i))
           t = 0
           while (t < i) {
             if (sumP(t + 1) >= u) {
-              println(s"math: $s2")
-              println(s"bit twiddle: $s3")
-              println(s"root: $s4")
-              println(s"return: ${System.nanoTime() - t5}")
+              //println(s"math: $s2")
+              //println(s"bit twiddle: $s3")
+              //println(s"root: $s4")
+              //println(s"return: ${System.nanoTime() - t5}")
               return LDA.combineTopics(topicOrder(t), currentTopic)
             }
             t += 1
@@ -576,11 +576,8 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
           val u = gen.nextDouble()
-          if (i < 4) {
-            LDA.sampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
-          } else {
-            LDA.fastSampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
-          }
+          //LDA.sampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          LDA.fastSampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
         })
       }, TripletFields.All)
       if (loggingTime && i % loggingInterval == 0) {
@@ -731,6 +728,9 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
     val likelihoodString = likelihoodList.mkString(",")
     val finalLikelihood = likelihoodList.last
     logInfo("LDA Model Parameters and Information")
+    logInfo(s"Topics: $nTopics")
+    logInfo(s"Alpha: $alpha")
+    logInfo(s"Beta: $beta")
     logInfo(s"Number of Documents: $nDocs")
     logInfo(s"Number of Words: $nWords")
     logInfo(s"Number of Tokens: $nTokens")

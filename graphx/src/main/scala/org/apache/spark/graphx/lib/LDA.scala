@@ -102,7 +102,7 @@ object LDA {
 
   /**
    * Creates a new histogram then applies the deltas in place to maintain the
-   * argsort order. I is assumed that deltas are sparse so that
+   * argsort order. It is assumed that deltas are sparse so that
    * the bubblesort used fast.
    * @param oldHistogram
    * @param deltas
@@ -110,7 +110,12 @@ object LDA {
    */
   def applyDeltasToHistogram(oldHistogram:Histogram, deltas:Array[Int], parameter:Double): Histogram = {
     if (oldHistogram.index.isEmpty) {
-      val counts = oldHistogram.counts.zip(deltas).map({case (v, d) => v + d})
+      val counts = new LDA.Counts(oldHistogram.counts.length)
+      var i = 0
+      while (i < counts.length) {
+        counts(i) = oldHistogram.counts(i) + deltas(i)
+        i += 1
+      }
       makeHistogramFromCounts(counts, IndexFalse, parameter)
     } else {
       val index = Index(oldHistogram.index.get.argsort.clone(), oldHistogram.index.get.lookup.clone())
@@ -576,11 +581,14 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         val gen = new java.util.Random(parts * interIter + pid)
         iter.map({ token =>
           val u = gen.nextDouble()
-          //LDA.sampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
-          LDA.fastSampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          if (i > 0) {
+            LDA.fastSampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          } else {
+            LDA.sampleToken(u, token.attr, token.dstAttr, token.srcAttr, totalHistogramBroadcast.value, totalNormSumBroadcast.value, nt, a, b, nw)
+          }
         })
       }, TripletFields.All)
-      if (loggingTime && i % loggingInterval == 0) {
+      if (loggingTime && i % loggingInterval == 0 && i > 0) {
         graph.cache().triplets.count()
         resampleTimes += System.nanoTime() - tempTimer
       }
@@ -616,7 +624,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       }).cache()
 
       //graph = graph.outerJoinVertices(newCounts)({(_, _, newFactorOpt) => newFactorOpt.get }).cache
-      if (loggingTime && i % loggingInterval == 0) {
+      if (loggingTime && i % loggingInterval == 0 && i > 0) {
         graph.cache().triplets.count()
         updateCountsTimes += System.nanoTime() - tempTimer
       }
@@ -626,7 +634,7 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       totalHistogram = LDA.makeHistogramFromCounts(graph.edges.map(e => e.attr)
         .aggregate(new Array[Int](nt))(LDA.combineTopicIntoCounts, LDA.combineCounts), LDA.IndexFalse, -1)
       assert(totalHistogram.counts.sum == nTokens)
-      if (loggingTime && i % loggingInterval == 0) {
+      if (loggingTime && i % loggingInterval == 0 && i > 0) {
         globalCountsTimes += System.nanoTime() - tempTimer
       }
 

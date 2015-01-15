@@ -67,23 +67,28 @@ object LDADataGenerator {
     val wordTopicCategoricalDistributions = sc.broadcast((0 until nTopics).map({d =>
       new Multinomial[DenseVector[Double], Int](wordTopicDirichlet.draw())
     }))
-    val data:RDD[(LDA.WordId, LDA.DocId)] = sc.parallelize(0 until nDocs).flatMap({ docId =>
-      // Initialize the per document dirichlet distribution identically for each document
-      Random.seed(seed)
-      val documentTopicDirichlet = new Dirichlet[DenseVector[Double], Int](DenseVector.fill[Double](nTopics, alpha))
-      // Set the seed so each document has a unique and deterministic dirichlet sample for use in the categorical
-      // Distribution to sample the word.
-      Random.seed(seed + docId)
-      val documentCategoricalDistribution = new Multinomial[DenseVector[Double], Int](documentTopicDirichlet.draw())
-      (0 until nTokensPerDoc).map({ _ =>
-        val topic = documentCategoricalDistribution.sample()
-        val wtcdValue = wordTopicCategoricalDistributions.value
-        val word:LDA.WordId = wtcdValue(topic).sample()
-        val doc:LDA.DocId = docId
-        (word, doc)
+    val perDocumentTokens:RDD[Seq[(LDA.WordId, LDA.DocId)]] = sc.parallelize(0 until nDocs).mapPartitionsWithIndex({ case (pid, docIds) =>
+      val dirichletVector = DenseVector.fill[Double](nTopics, alpha)
+      val documentTokens = docIds.map({docId =>
+        Random.seed(seed)
+        val documentTopicDirichlet = new Dirichlet[DenseVector[Double], Int](dirichletVector)
+        // Set the seed so each document has a unique and deterministic dirichlet sample for use in the categorical
+        // Distribution to sample the word.
+        Random.seed(seed + docId)
+        val documentCategoricalDistribution = new Multinomial[DenseVector[Double], Int](documentTopicDirichlet.draw())
+        val tokens: Seq[(LDA.WordId, LDA.DocId)] = (0 until nTokensPerDoc).map({ _ =>
+          val topic = documentCategoricalDistribution.sample()
+          val wtcdValue = wordTopicCategoricalDistributions.value
+          val word:LDA.WordId = wtcdValue(topic).sample()
+          val doc:LDA.DocId = docId
+          (word, doc)
+        })
+        tokens
       })
+      documentTokens
     })
-    return data
+    val data:RDD[(LDA.WordId, LDA.DocId)] = perDocumentTokens.flatMap(doc => doc)
+    data
   }
 
   def main(args: Array[String]): Unit = {

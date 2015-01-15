@@ -353,7 +353,6 @@ object LDA {
                       alpha: Double,
                       beta: Double,
                       nw: Long): Topic = {
-    var t1 = System.nanoTime()
     val currentTopic = LDA.currentTopic(topic)
     val topicOrder = docHistogram.index.get.argsort
     val aCounts = docHistogram.counts
@@ -378,18 +377,9 @@ object LDA {
     var a:Double = 0
     var b:Double = 0
     var c:Double = 0
-    var s2 = 0L
-    var t2 = 0L
-    var s3 = 0L
-    var t3 = 0L
-    var t4 = 0L
-    var s4 = 0L
-    var t5 = 0L
     var t = 0
     var offset: Int = 0
-    //println(s"start: ${System.nanoTime() - t1}")
     while (i < nt) {
-      t2 = System.nanoTime()
       k = topicOrder(i)
       offset = (k == currentTopic).compare(true)
       a = aCounts(k) - offset + alpha
@@ -397,35 +387,21 @@ object LDA {
       c = 1D / (cCounts(k) - offset + beta * nw)
       sumP(i + 1) = sumP(i)
       sumP(i + 1) += a * b * c
-      s2 += System.nanoTime() - t2
-      t3 = System.nanoTime()
       bits = java.lang.Double.doubleToRawLongBits(aSquareSum - a * a * a)
       aSquareSum = java.lang.Double.longBitsToDouble(~(bits >> 63) & bits)
       bits = java.lang.Double.doubleToRawLongBits(bSquareSum - b * b * b)
       bSquareSum = java.lang.Double.longBitsToDouble(~(bits >> 63) & bits)
       bits = java.lang.Double.doubleToRawLongBits(cSquareSum - c * c * c)
       cSquareSum = java.lang.Double.longBitsToDouble(~(bits >> 63) & bits)
-      s3 += System.nanoTime() - t3
-      t4 = System.nanoTime()
       zBound(i) = sumP(i + 1) + LDA.cubeRoot(aSquareSum * bSquareSum * cSquareSum)
-      s4 += System.nanoTime() - t4
-      t5 = System.nanoTime()
       if (sumP(i + 1) >= u * zBound(i) ) {
         if (i == 0 || u * zBound(i) > sumP(i)) {
-          //println(s"math: $s2")
-          //println(s"bit twiddle: $s3")
-          //println(s"root: $s4")
-          //println(s"return: ${System.nanoTime() - t5}")
           return LDA.combineTopics(k, currentTopic)
         } else {
           u = (u * zBound(i - 1) - sumP(i)) * zBound(i) / (zBound(i - 1) - zBound(i))
           t = 0
           while (t < i) {
             if (sumP(t + 1) >= u) {
-              //println(s"math: $s2")
-              //println(s"bit twiddle: $s3")
-              //println(s"root: $s4")
-              //println(s"return: ${System.nanoTime() - t5}")
               return LDA.combineTopics(topicOrder(t), currentTopic)
             }
             t += 1
@@ -596,9 +572,6 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
       // Update the counts
       tempTimer = System.nanoTime()
 
-      //val newCounts = graph.triplets
-      //                   .flatMap(e => {Iterator((e.srcId, e.attr), (e.dstId, e.attr))})
-      //                   .aggregateByKey(new Array[Int](nt))(LDA.combineTopicIntoHistogram(_, _), LDA.combineHistograms(_, _))
       val deltas = graph.edges
         .flatMap(e => {
             val topic = e.attr
@@ -623,7 +596,6 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
         }
       }).cache()
 
-      //graph = graph.outerJoinVertices(newCounts)({(_, _, newFactorOpt) => newFactorOpt.get }).cache
       if (loggingTime && i % loggingInterval == 0 && i > 0) {
         graph.cache().triplets.count()
         updateCountsTimes += System.nanoTime() - tempTimer

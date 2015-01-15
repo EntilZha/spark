@@ -67,7 +67,7 @@ object LDADataGenerator {
     val wordTopicCategoricalDistributions = sc.broadcast((0 until nTopics).map({d =>
       new Multinomial[DenseVector[Double], Int](wordTopicDirichlet.draw())
     }))
-    val perDocumentTokens:RDD[Seq[(LDA.WordId, LDA.DocId)]] = sc.parallelize(0 until nDocs).mapPartitionsWithIndex({ case (pid, docIds) =>
+    val perDocumentTokens:RDD[Seq[(LDA.WordId, LDA.DocId)]] = sc.parallelize(0 until nDocs).mapPartitions({docIds =>
       val dirichletVector = DenseVector.fill[Double](nTopics, alpha)
       val documentTokens = docIds.map({docId =>
         Random.seed(seed)

@@ -69,9 +69,8 @@ object LDADataGenerator {
     }))
     val perDocumentTokens:RDD[Seq[(LDA.WordId, LDA.DocId)]] = sc.parallelize(0 until nDocs).mapPartitions({docIds =>
       val dirichletVector = DenseVector.fill[Double](nTopics, alpha)
+      val documentTopicDirichlet = new Dirichlet[DenseVector[Double], Int](dirichletVector)
       val documentTokens = docIds.map({docId =>
-        Random.seed(seed)
-        val documentTopicDirichlet = new Dirichlet[DenseVector[Double], Int](dirichletVector)
         // Set the seed so each document has a unique and deterministic dirichlet sample for use in the categorical
         // Distribution to sample the word.
         Random.seed(seed + docId)

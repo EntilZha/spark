@@ -56,6 +56,10 @@ object LDA {
 
   class Posterior(docs: VertexRDD[Histogram], words: VertexRDD[Histogram])
 
+  def isDocumentVertex(v: VertexId): Boolean = v < 0
+
+  def isWordVertex(v: VertexId): Boolean = v >= 0
+
   def currentTopic(topic: Topic): Int = {
     (topic >> 32).asInstanceOf[Int]
   }
@@ -207,6 +211,10 @@ object LDA {
     } else {
       Histogram(counts, Option.empty, LDA.computeNormSum(counts, parameter))
     }
+  }
+
+  def makeEmptyHistogram(nTopics: Int): Histogram = {
+    Histogram(new Counts(nTopics), Option.empty, 0)
   }
 
   /**
@@ -420,6 +428,24 @@ object LDA {
     }
     true
   }
+  def vertices(edges: RDD[Edge[LDA.Topic]],
+               getVertex: Edge[LDA.Topic] => VertexId,
+               nTopics: Int,
+               vertexType: VertexId,
+               a: Double,
+               b: Double): RDD[(Long, LDA.Histogram)] = {
+    edges.groupBy(getVertex(_)).aggregateByKey(LDA.makeEmptyHistogram(nTopics))({ case (histogram, iterator) =>
+      iterator.foreach({e =>
+        histogram.counts(LDA.currentTopic(e.attr)) += 1
+      })
+      val parameter = if (vertexType < 0) a else b
+      LDA.makeHistogramFromCounts(histogram.counts, vertexType, parameter)
+    },
+    { case (l, r) =>
+      LDA.combineCounts(l.counts, r.counts)
+      l
+    })
+  }
 }
 
 /**
@@ -478,33 +504,24 @@ class LDA(@transient val tokens: RDD[(LDA.WordId, LDA.DocId)],
      * The bipartite terms by document graph.
      */
     graph = {
-      // To setup a bipartite graph it is necessary to ensure that the document and
-      // word ids are in a different namespace
-      val renumbered = tokens.map({ case (wordId, docId) =>
-        assert(wordId >= 0)
-        assert(docId >= 0)
-        val newDocId: LDA.DocId = -(docId + 1L)
-        (wordId, newDocId)
-      })
       val nT = nTopics
       val a = alpha
       val b = beta
-      // Sample the tokens
-      val gTmp = Graph.fromEdgeTuples(renumbered, false).mapEdges({ (pid, iter) =>
-          val gen = new java.util.Random(pid)
-          iter.map(e => LDA.combineTopics(gen.nextInt(nT), 0))
+      // To setup a bipartite graph it is necessary to ensure that the document and
+      // word ids are in a different namespace
+      val edges: RDD[Edge[LDA.Topic]] = tokens.mapPartitionsWithIndex({ case (pid, iterator) =>
+        val gen = new java.util.Random(pid)
+        iterator.map({ case (wordId, docId) =>
+          assert(wordId >= 0)
+          assert(docId >= 0)
+          val newDocId: LDA.DocId = -(docId + 1L)
+          Edge(wordId, newDocId, LDA.combineTopics(gen.nextInt(nT), 0))
+        })
       })
-      // Compute the topic histograms (factors) for each word and document
-      val newCounts = gTmp.mapReduceTriplets[LDA.Counts](
-        e => Iterator((e.srcId, LDA.makeCountsFromTopic(nT, e.attr)), (e.dstId, LDA.makeCountsFromTopic(nT, e.attr))),
-        (a, b) => LDA.combineCounts(a,b)
-      )
-      // Update the graph with the factors
-      gTmp.outerJoinVertices(newCounts)({(vid, _, newFactorOpt) =>
-        val parameter = if (vid < 0) a else b
-        LDA.makeHistogramFromCounts(newFactorOpt.get, vid, parameter)
-      }).cache()
-    }
+      val setupWordVertices = LDA.vertices(edges, _.srcId, nT, LDA.IndexFalse, a, b)
+      val setupDocVertices = LDA.vertices(edges, _.dstId, nT, LDA.IndexTrue, a, b)
+      Graph(setupDocVertices ++ setupWordVertices, edges).partitionBy(PartitionStrategy.EdgePartition1D)
+    }.cache()
     nWords = wordVertices.count()
     nDocs = docVertices.count()
     nTokens = graph.edges.count()

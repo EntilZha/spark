@@ -15,11 +15,11 @@
  * limitations under the License.
  */
 
-package org.apache.spark.graphx.util
+package org.apache.spark.mllib.util
 
 import scala.collection.mutable.{HashMap => MutableHashMap}
 
-private[graphx] object TimeTracker {
+private[mllib] object TimeTracker {
   def nanosecondsToSeconds(v: Double): Double ={
     v / 1e9
   }
@@ -28,7 +28,7 @@ private[graphx] object TimeTracker {
 /**
  * Time tracker implementation which holds labeled timers.
  */
-private[graphx] class TimeTracker extends Serializable {
+private[mllib] class TimeTracker extends Serializable {
 
   private val starts: MutableHashMap[String, Long] = new MutableHashMap[String, Long]()
 

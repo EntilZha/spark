@@ -15,12 +15,8 @@
  * limitations under the License.
  */
 
-package org.apache.spark.graphx.lib
+package org.apache.spark.mllib.topicmodeling
 
-import breeze.linalg.DenseVector
-import org.apache.spark.SparkContext._
-import org.apache.spark.graphx._
-import org.apache.spark.graphx.lib.LDA.{Histogram, DocId, Topic, WordId}
 import org.apache.spark.rdd._
 import org.scalatest.{FunSuite, Matchers}
 

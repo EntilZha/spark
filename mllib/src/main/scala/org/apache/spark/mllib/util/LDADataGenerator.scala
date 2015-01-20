@@ -22,7 +22,7 @@ import breeze.linalg.DenseVector
 import breeze.stats.distributions.{Multinomial, Dirichlet}
 import org.apache.spark.SparkContext
 import org.apache.spark.annotation.DeveloperApi
-import org.apache.spark.graphx.lib.LDA
+import org.apache.spark.mllib.topicmodeling.LDA
 import org.apache.spark.rdd.RDD
 import breeze.stats.distributions
 import org.jblas.util.Random

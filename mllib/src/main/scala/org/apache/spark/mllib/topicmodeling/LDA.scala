@@ -242,8 +242,6 @@ object LDA {
   }
 
   object GibbsLearningState extends LearningStateInitialization {
-    import GibbsLearningState._
-
     /**
      * These two variables are used for turning indexing on and off when creating new histograms
      */
@@ -456,8 +454,7 @@ object LDA {
                               delimiter: String = " "): RDD[(WordId, DocId)] = {
       val sc = lines.sparkContext
       val numDocs = lines.count()
-      val docIds: RDD[DocId] = sc.parallelize((0L until numDocs).toArray, lines.partitions.size)
-      val docsWithIds = lines.zip(docIds)
+      val docsWithIds = lines.zipWithUniqueId()
       val edges: RDD[(WordId, DocId)] = docsWithIds.flatMap { case (line: String, docId: DocId) =>
         val words = line.split(delimiter)
         val docEdges = words.map(word => (vocabLookup(word), docId))

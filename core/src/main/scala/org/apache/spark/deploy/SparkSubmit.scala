@@ -142,6 +142,8 @@ object SparkSubmit {
         printErrorAndExit("Cluster deploy mode is currently not supported for python applications.")
       case (_, CLUSTER) if isShell(args.primaryResource) =>
         printErrorAndExit("Cluster deploy mode is not applicable to Spark shells.")
+      case (_, CLUSTER) if isSqlShell(args.mainClass) =>
+        printErrorAndExit("Cluster deploy mode is not applicable to Spark SQL shell.")
       case _ =>
     }
 
@@ -198,6 +200,7 @@ object SparkSubmit {
       // Yarn cluster only
       OptionAssigner(args.name, YARN, CLUSTER, clOption = "--name"),
       OptionAssigner(args.driverMemory, YARN, CLUSTER, clOption = "--driver-memory"),
+      OptionAssigner(args.driverCores, YARN, CLUSTER, clOption = "--driver-cores"),
       OptionAssigner(args.queue, YARN, CLUSTER, clOption = "--queue"),
       OptionAssigner(args.numExecutors, YARN, CLUSTER, clOption = "--num-executors"),
       OptionAssigner(args.executorMemory, YARN, CLUSTER, clOption = "--executor-memory"),
@@ -277,6 +280,11 @@ object SparkSubmit {
     // Load any properties specified through --conf and the default properties file
     for ((k, v) <- args.sparkProperties) {
       sysProps.getOrElseUpdate(k, v)
+    }
+
+    // Ignore invalid spark.driver.host in cluster modes.
+    if (deployMode == CLUSTER) {
+      sysProps -= ("spark.driver.host")
     }
 
     // Resolve paths in certain spark properties
@@ -391,6 +399,13 @@ object SparkSubmit {
    */
   private[spark] def isShell(primaryResource: String): Boolean = {
     primaryResource == SPARK_SHELL || primaryResource == PYSPARK_SHELL
+  }
+
+  /**
+   * Return whether the given main class represents a sql shell.
+   */
+  private[spark] def isSqlShell(mainClass: String): Boolean = {
+    mainClass == "org.apache.spark.sql.hive.thriftserver.SparkSQLCLIDriver"
   }
 
   /**

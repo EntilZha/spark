@@ -456,7 +456,7 @@ object LDA {
                               delimiter: String = " "): RDD[(WordId, DocId)] = {
       val sc = lines.sparkContext
       val numDocs = lines.count()
-      val docIds: RDD[DocId] = sc.parallelize((0L until numDocs).toArray)
+      val docIds: RDD[DocId] = sc.parallelize((0L until numDocs).toArray, lines.partitions.size)
       val docsWithIds = lines.zip(docIds)
       val edges: RDD[(WordId, DocId)] = docsWithIds.flatMap { case (line: String, docId: DocId) =>
         val words = line.split(delimiter)
